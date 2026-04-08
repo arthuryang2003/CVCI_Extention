@@ -22,8 +22,8 @@ from datetime import date
 import numpy as np
 import pandas as pd
 
-from causal_sim import compute_exp_minmizer, lalonde_get_data
-from cvci_plugins import build_obs_plugin, fit_base_cvci, fit_cvci_with_plugin
+from rct.causal_sim import compute_exp_minmizer, lalonde_get_data
+from rct.cvci_plugins import build_obs_plugin, fit_base_cvci, fit_cvci_with_plugin
 
 
 DEFAULT_VARIABLES = ["re75"]

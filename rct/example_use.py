@@ -3,7 +3,7 @@ Example use of our method.
 """
 
 import numpy as np
-from causal_sim import model_class, cross_validation, generate_data, true_pi_func
+from rct.causal_sim import model_class, cross_validation, generate_data, true_pi_func
 import matplotlib.pyplot as plt
 from datetime import date
 import os

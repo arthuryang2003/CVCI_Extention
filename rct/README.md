@@ -1,9 +1,4 @@
 # Cross-Validated Causal Inference (CVCI)
-## Repository Structure
-
-- `rct/`: methods where RCT data is the target (current CVCI implementation).
-- `obs/`: methods where OBS data is the target (placeholder for future implementation).
-
 ## Paper
 [ArXiv link](http://arxiv.org/abs/2511.00727)
 

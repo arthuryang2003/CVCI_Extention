@@ -6,7 +6,7 @@ from scipy.optimize import minimize
 from scipy.stats import pearsonr
 from sklearn.linear_model import LinearRegression, LogisticRegression
 
-from causal_sim import cross_validation
+from rct.causal_sim import cross_validation
 
 
 @dataclass

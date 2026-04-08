@@ -17,7 +17,7 @@ import pickle
 import json
 from datetime import date
 import os
-from causal_sim import cross_validation, lalonde_get_data, t_test_normal_baseline 
+from rct.causal_sim import cross_validation, lalonde_get_data, t_test_normal_baseline 
 import dask
 import pandas as pd
 import argparse

@@ -11,7 +11,7 @@ import pickle
 import json
 from datetime import date
 import os
-from causal_sim import cross_validation, t_test_normal_baseline
+from rct.causal_sim import cross_validation, t_test_normal_baseline
 
 random_seed = 2024
 np.random.seed(random_seed)

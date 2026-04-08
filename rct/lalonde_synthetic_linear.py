@@ -17,7 +17,7 @@ import pickle
 import json
 from datetime import date
 import os
-from causal_sim import model_class, compute_exp_minmizer, L_exp, L_obs, combined_loss, cross_validation, true_pi_func, tilde_pi_func, lalonde_get_data, generate_data
+from rct.causal_sim import model_class, compute_exp_minmizer, L_exp, L_obs, combined_loss, cross_validation, true_pi_func, tilde_pi_func, lalonde_get_data, generate_data
 import pandas as pd
 from sklearn.linear_model import LinearRegression 
 import argparse

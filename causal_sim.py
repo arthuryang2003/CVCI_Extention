@@ -85,7 +85,11 @@ class model_class(torch.nn.Module):
         '''
         return (1 - lambda_) * np.mean(X_exp) + lambda_ * np.mean(X_obs)
         
+<<<<<<< HEAD
     def fit_model(self, lambda_, X_exp, X_obs, obs_weights=None, obs_outcomes=None):
+=======
+    def fit_model(self, lambda_, X_exp, X_obs):
+>>>>>>> d74cb7c928938fd1a2978481f9aab6ac654c7d08
         """
         Fit the model given specific lambda using both sources of data.
         
@@ -110,30 +114,44 @@ class model_class(torch.nn.Module):
             Z = X_obs[:, :self.d_obs]
             A = X_obs[:, self.d_obs]
             intercept = torch.ones((X_obs.shape[0], 1))
+<<<<<<< HEAD
             Y = X_obs[:, -1] if obs_outcomes is None else np.asarray(obs_outcomes, dtype=float).reshape(-1)
             if obs_weights is None:
                 obs_weights = np.ones(X_obs.shape[0], dtype=float)
             obs_weights = np.asarray(obs_weights, dtype=float)
             obs_weights = obs_weights / np.mean(obs_weights)
             weight_tensor = torch.tensor(obs_weights, dtype=torch.float64).reshape(-1, 1)
+=======
+            Y = X_obs[:, -1] 
+>>>>>>> d74cb7c928938fd1a2978481f9aab6ac654c7d08
             
             A_Z = torch.cat((torch.tensor(A).reshape(-1, 1), torch.tensor(Z), intercept), dim=1) # n_obs * d+1
             e1 = torch.zeros(self.d_obs + 1 + 1) # + intercept
             e1[0] = 1
             e1 = e1.reshape(-1, 1) # d+2 * 1
+<<<<<<< HEAD
             weighted_design = weight_tensor * A_Z
             weighted_outcome = weight_tensor * torch.tensor(Y, dtype=torch.float64).reshape(-1, 1)
             l_matrix =  (1 - lambda_ ) * e1 @ e1.T + lambda_ / X_obs.shape[0] * A_Z.T @ weighted_design
             r_matrix = (1 - lambda_ ) * beta_exp_precompute *  e1 + lambda_ / X_obs.shape[0] * A_Z.T @ weighted_outcome
+=======
+            l_matrix =  (1 - lambda_ ) * e1 @ e1.T + lambda_ / X_obs.shape[0] * A_Z.T @ A_Z
+            r_matrix = (1 - lambda_ ) * beta_exp_precompute *  e1 + lambda_ / X_obs.shape[0] * A_Z.T @ torch.tensor(Y).reshape(-1, 1)
+>>>>>>> d74cb7c928938fd1a2978481f9aab6ac654c7d08
             det = torch.det(l_matrix)
             if torch.isclose(det, torch.tensor(0.0, dtype=det.dtype), atol=1e-7):
                 # min norm solution closed-form 
                 if lambda_ == 1 and (np.array_equal(A, np.ones_like(A)) or np.array_equal(A, np.zeros_like(A))):
                     # all treated or all untreated (multicollinearity)
                     A_Z = torch.cat((torch.tensor(Z), intercept), dim=1)  # exclude treatment
+<<<<<<< HEAD
                     weighted_design = weight_tensor * A_Z
                     l_matrix = lambda_ / X_obs.shape[0] * A_Z.T @ weighted_design
                     r_matrix = lambda_ / X_obs.shape[0] * A_Z.T @ weighted_outcome
+=======
+                    l_matrix = lambda_ / X_obs.shape[0] * A_Z.T @ A_Z
+                    r_matrix = lambda_ / X_obs.shape[0] * A_Z.T @ torch.tensor(Y).reshape(-1, 1)
+>>>>>>> d74cb7c928938fd1a2978481f9aab6ac654c7d08
                     solution = l_matrix.T @ (l_matrix @ l_matrix.T).inverse() @ r_matrix
                     solution = torch.cat((torch.tensor([0.0]), solution.reshape(-1)), dim=0) # add 0 as treatment coef
                 else: 
@@ -245,7 +263,11 @@ def L_exp(beta, X, mode='mean', beta_exp_precompute=None, exp_model='aipw', stra
         return (beta_exp - beta)**2
         
 
+<<<<<<< HEAD
 def L_obs(theta_model, X, mode='mean', d_obs=None, obs_weights=None, obs_outcomes=None):
+=======
+def L_obs(theta_model, X, mode='mean', d_obs=None):
+>>>>>>> d74cb7c928938fd1a2978481f9aab6ac654c7d08
     ''' 
     Compute the loss on observational data.
     
@@ -258,6 +280,7 @@ def L_obs(theta_model, X, mode='mean', d_obs=None, obs_weights=None, obs_outcome
     Return: loss of observational model on observational data
     '''
     if mode == 'mean':
+<<<<<<< HEAD
         if obs_weights is None:
             obs_mean = np.mean(X)
         else:
@@ -265,11 +288,15 @@ def L_obs(theta_model, X, mode='mean', d_obs=None, obs_weights=None, obs_outcome
             obs_weights = obs_weights / np.sum(obs_weights)
             obs_mean = np.sum(obs_weights * X)
         return np.mean((obs_mean - theta_model) ** 2) # experiement were run under np.sum, but should be equivalent 
+=======
+        return np.mean((np.mean(X) - theta_model) ** 2) # experiement were run under np.sum, but should be equivalent 
+>>>>>>> d74cb7c928938fd1a2978481f9aab6ac654c7d08
     if mode == 'linear':
         assert d_obs is not None, "please specify d_obs in L_obs"
         X = torch.tensor(X, dtype=torch.float64)
         Z = X[:, :d_obs]
         A = X[:, d_obs]
+<<<<<<< HEAD
         Y = X[:, -1] if obs_outcomes is None else torch.tensor(obs_outcomes, dtype=torch.float64).reshape(-1)
         X_pred = torch.matmul(torch.cat([A.view(-1, 1), Z], dim=1), theta_model[:-1]) + theta_model[-1] 
         sq_error = (X_pred - Y) ** 2
@@ -281,6 +308,14 @@ def L_obs(theta_model, X, mode='mean', d_obs=None, obs_weights=None, obs_outcome
    
         
 def combined_loss(theta, X_exp, X_obs, lambda_, mode='mean', beta_exp_precompute=None, exp_model='aipw', stratified_kfold=False, d_exp=None, d_obs=None, rng=None, obs_weights=None, obs_outcomes=None):
+=======
+        Y = X[:, -1] 
+        X_pred = torch.matmul(torch.cat([A.view(-1, 1), Z], dim=1), theta_model[:-1]) + theta_model[-1] 
+        return torch.mean((X_pred - Y) ** 2)
+   
+        
+def combined_loss(theta, X_exp, X_obs, lambda_, mode='mean', beta_exp_precompute=None, exp_model='aipw', stratified_kfold=False, d_exp=None, d_obs=None, rng=None):
+>>>>>>> d74cb7c928938fd1a2978481f9aab6ac654c7d08
     ''' 
     Compute the combined loss on experimental and observational data.
     
@@ -304,16 +339,28 @@ def combined_loss(theta, X_exp, X_obs, lambda_, mode='mean', beta_exp_precompute
     '''
     
     if mode == 'mean':
+<<<<<<< HEAD
         combined = (1 - lambda_) * L_exp(theta.beta(lambda_, X_exp, X_obs), X_exp, mode=mode) +  lambda_ * L_obs(theta(lambda_, X_exp, X_obs), X_obs, mode=mode, obs_weights=obs_weights, obs_outcomes=obs_outcomes) 
     if mode == 'linear': 
         assert d_obs is not None, "please specify d_obs in combined_loss"
         loss_exp = L_exp(theta.beta(), X_exp, mode=mode, beta_exp_precompute=beta_exp_precompute, exp_model=exp_model, stratified_kfold=stratified_kfold, d_exp=d_exp, rng=rng)
         loss_obs = L_obs(theta.theta_model, X_obs, mode=mode, d_obs=d_obs, obs_weights=obs_weights, obs_outcomes=obs_outcomes) 
+=======
+        combined = (1 - lambda_) * L_exp(theta.beta(lambda_, X_exp, X_obs), X_exp, mode=mode) +  lambda_ * L_obs(theta(lambda_, X_exp, X_obs), X_obs, mode=mode) 
+    if mode == 'linear': 
+        assert d is not None, "please specify d in combined_loss"
+        loss_exp = L_exp(theta.beta(), X_exp, mode=mode, beta_exp_precompute=beta_exp_precompute, exp_model=exp_model, stratified_kfold=stratified_kfold, d_exp=d_exp, rng=rng)
+        loss_obs = L_obs(theta.theta_model, X_obs, mode=mode, d_obs=d_obs) 
+>>>>>>> d74cb7c928938fd1a2978481f9aab6ac654c7d08
         combined = (1 - lambda_) * loss_exp + lambda_  * loss_obs
     return combined
     
 
+<<<<<<< HEAD
 def cross_validation(X_exp, X_obs, lambda_vals, mode='mean', k_fold=None, d_exp=None, d_obs=None, exp_model='aipw', stratified_kfold=False, random_state=None, rng=None, obs_weights=None, obs_outcomes=None):
+=======
+def cross_validation(X_exp, X_obs, lambda_vals, mode='mean', k_fold=None, d_exp=None, d_obs=None, exp_model='aipw', stratified_kfold=False, random_state=None, rng=None):
+>>>>>>> d74cb7c928938fd1a2978481f9aab6ac654c7d08
     """
     Calculate the cross validation error for each lambda.
     Args: 
@@ -355,7 +402,11 @@ def cross_validation(X_exp, X_obs, lambda_vals, mode='mean', k_fold=None, d_exp=
             # fit a model for each fold
             model = model_class(mode=mode, d_exp=d_exp, d_obs=d_obs, exp_model=exp_model, stratified_kfold=stratified_kfold, rng=rng)
             X_train, X_val = X_exp[train_index], X_exp[val_index]
+<<<<<<< HEAD
             model.fit_model(lambda_, X_train, X_obs, obs_weights=obs_weights, obs_outcomes=obs_outcomes)
+=======
+            model.fit_model(lambda_, X_train, X_obs)
+>>>>>>> d74cb7c928938fd1a2978481f9aab6ac654c7d08
             with torch.no_grad():
                 l_exp_fold = L_exp(model.beta(lambda_, X_train, X_obs), X_val, mode=mode, exp_model=exp_model, stratified_kfold=stratified_kfold, d_exp=d_exp, rng=rng)
                 current_Q += l_exp_fold.item()
@@ -363,7 +414,11 @@ def cross_validation(X_exp, X_obs, lambda_vals, mode='mean', k_fold=None, d_exp=
     Q_values /= X_exp.shape[0]
     lambda_opt = lambda_vals[np.argmin(Q_values)] # optimal lambda
     theta_opt = model_class(mode=mode, d_exp=d_exp, d_obs=d_obs, exp_model=exp_model, stratified_kfold=stratified_kfold, rng=rng)
+<<<<<<< HEAD
     theta_opt.fit_model(lambda_opt, X_exp, X_obs, obs_weights=obs_weights, obs_outcomes=obs_outcomes) # fitted model on full data using optimal lambda
+=======
+    theta_opt.fit_model(lambda_opt, X_exp, X_obs) # fitted model on full data using optimal lambda
+>>>>>>> d74cb7c928938fd1a2978481f9aab6ac654c7d08
     return Q_values, lambda_opt, theta_opt
 
 
@@ -448,4 +503,8 @@ def t_test_normal_baseline(x_exp, x_obs, alpha_threshold=0.05, equal_var=True):
         #print("reject the null that equal mean, use X_exp sample mean")
         return np.mean(x_exp)
     else:
+<<<<<<< HEAD
         return np.mean(np.concatenate((x_exp, x_obs), axis=0))
+=======
+        return np.mean(np.concatenate((x_exp, x_obs), axis=0))
+>>>>>>> d74cb7c928938fd1a2978481f9aab6ac654c7d08

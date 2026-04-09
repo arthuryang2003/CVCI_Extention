@@ -17,9 +17,10 @@ import pickle
 import json
 from datetime import date
 import os
-from rct.causal_sim import cross_validation, lalonde_get_data, t_test_normal_baseline 
+from rct.models import cross_validation, lalonde_get_data, t_test_normal_baseline 
 import dask
 import pandas as pd
+from rct.experiments.data_interface import get_lalonde_dataframe
 import argparse
 
 
@@ -34,7 +35,7 @@ args = parser.parse_args()
 group = args.group
 is_bootstrap = args.is_bootstrap
 
-df = pd.read_csv('lalonde.csv')
+df = get_lalonde_dataframe()
 df['age2'] = df['age'] ** 2
 
 n_sims = 100 # number of simulations, 5000 in the paper

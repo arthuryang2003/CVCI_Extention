@@ -1,4 +1,27 @@
 # Cross-Validated Causal Inference (CVCI)
+## Recommended Package Structure (OBS-aligned)
+- `rct/data.py`: dataset loading/building utilities
+- `rct/models.py`: core estimation models and objectives
+- `rct/plugins.py`: plugin-facing API for bias correction methods
+- `rct/experiments/`: experiment scripts + unified data interface (`data_interface.py`)
+- `rct/read_lalonde_data.py`: lightweight compatibility entrypoint
+
+### Generate `lalonde.csv` (Python)
+Recommended:
+```
+python -m rct.experiments.generate_lalonde_csv
+```
+Default behavior writes to repository root: `./lalonde.csv` (outside `rct/`).
+
+Optional explicit path:
+```
+python -m rct.experiments.generate_lalonde_csv --data-dir data --output-path lalonde.csv
+```
+Legacy (still supported):
+```
+python rct/read_lalonde_data.py
+```
+
 ## Paper
 [ArXiv link](http://arxiv.org/abs/2511.00727)
 
@@ -24,15 +47,15 @@ Results will be printed to the terminal.
 
 Run 
 ```
-python rct/mean_eps.py
+python -m rct.experiments.mean_eps
 ```
 or 
 ```
-python rct/mean_n_obs.py
+python -m rct.experiments.mean_n_obs
 ```
 or 
 ```
-python rct/mean_n_exp.py
+python -m rct.experiments.mean_n_exp
 ```
 Results are saved as JSON files (for data) and PDF files (for figures). Detailed usage see python scripts. The current scripts may take a few minutes each. 
 
@@ -47,11 +70,11 @@ Results are saved as JSON files (for data) and PDF files (for figures). Detailed
 ### Usage
 Choice 1: Directly run 
 ```
-python rct/linear_eps.py
+python -m rct.experiments.linear_eps
 ``` 
 or 
 ```
-python rct/linear_n_obs.py
+python -m rct.experiments.linear_n_obs
 ``` 
 
 Choise 2: Use a bash script and specify ``--cpus-per-task`` for parallel computing.
@@ -114,29 +137,25 @@ To run the python scripts,
 
 Choice 1: Directly run 
 ```
-python rct/lalonde_cv.py
+python -m rct.experiments.lalonde_cv
 ``` 
 or 
 ```
-python rct/lalonde_cv_bootstrap.py
+python -m rct.experiments.lalonde_cv_bootstrap
 ```
 or 
 ```
-python rct/lalonde_synthetic_linear.py
+python -m rct.experiments.lalonde_synthetic_linear
 ``` 
 or 
 ```
-python rct/lalonde_intro_mean.py
+python -m rct.experiments.lalonde_intro_mean
 ```
 or 
 ```
-python rct/lalonde_intro_linear.py
+python -m rct.experiments.lalonde_intro_linear
 ```
 
 Results are saved as JSON files (for data) and TXT files (for tables or texts).
 
 Choise 2: For scripts with full configurations, use a bash script and specify ``--cpus-per-task`` for parallel computing. For single configuration, use arguments specified in the script.
-
-
-
-

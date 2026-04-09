@@ -8,7 +8,7 @@ from datetime import date
 import numpy as np
 
 
-PYTHON_EXE = r"D:\Anaconda3\python.exe"
+PYTHON_EXE = sys.executable
 METHODS = ["none", "ipsw", "cw", "iv", "shadow"]
 GROUPS = ["cps", "psid"]
 VARIABLE_SETS = [
@@ -29,7 +29,8 @@ def _extract_json_from_stdout(stdout: str):
 def _run_one(method: str, group: str, variables, random_state: int):
     cmd = [
         PYTHON_EXE,
-        "lalonde_cvci_plugin_linear.py",
+        "-m",
+        "rct.experiments.lalonde_cvci_plugin_linear",
         "--method",
         method,
         "--group",
@@ -40,6 +41,8 @@ def _run_one(method: str, group: str, variables, random_state: int):
         *variables,
     ]
     env = os.environ.copy()
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = os.getcwd() if not existing_pythonpath else f"{os.getcwd()}:{existing_pythonpath}"
     completed = subprocess.run(cmd, capture_output=True, text=True, check=True, env=env)
     return _extract_json_from_stdout(completed.stdout)
 

@@ -13,7 +13,7 @@ import pickle
 import json
 from datetime import date
 import os
-from rct.causal_sim import compute_exp_minmizer, cross_validation, true_pi_func, tilde_pi_func, generate_data
+from rct.models import compute_exp_minmizer, cross_validation, true_pi_func, tilde_pi_func, generate_data
 import dask
 
 random_seed = 2024 

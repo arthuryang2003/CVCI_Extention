@@ -1,37 +1,29 @@
-""" 
-Read LaLonde data and store it to a CSV file.
+"""
+Backward-compatible wrapper for generating ``lalonde.csv``.
 
-Usage: Download the .txt files of NSW Data Files (Dehejia-Wahha Sample) and PSID and CPS Data Files from [http://users.nber.org/~rdehejia/nswdata2.html] and put them into a \data folder.
-
+Recommended new command:
+    python -m rct.experiments.generate_lalonde_csv
+Legacy command kept for compatibility:
+    python rct/read_lalonde_data.py
 """
 
-import pandas as pd
-import glob
-import os
+from pathlib import Path
+import sys
 
-# Initialize empty dataframe
-lalonde = pd.DataFrame()
+project_root = Path(__file__).resolve().parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
-# Loop through all .txt files in data/ directory
-for file in glob.glob("data/*.txt"):
-    # Read file
-    df = pd.read_csv(file, sep=r"\s+", header=None)
-    df.columns = ['treatment', 'age', 'education', 'black', 'hispanic',
-                  'married', 'nodegree', 're74', 're75', 're78']
-    
-    # Extract group name from filename
-    name = os.path.splitext(os.path.basename(file))[0].split("_")
-    df["group"] = name[0] if name[1] == "controls" else name[1]
-    
-    # Append to lalonde
-    lalonde = pd.concat([lalonde, df], ignore_index=True)
+from rct.data import generate_lalonde_csv
 
-# Create u74 and u75
-lalonde["u74"] = (lalonde["re74"] == 0).astype(int)
-lalonde["u75"] = (lalonde["re75"] == 0).astype(int)
 
-for col in ["treatment", "black", "hispanic", "married", "nodegree", "u74", "u75"]:
-    lalonde[col] = lalonde[col].astype("category")
-    
-lalonde.to_csv("lalonde.csv", index=False)
-print("Data saved in lalonde.csv")
+if __name__ == "__main__":
+    summary = generate_lalonde_csv()
+    print(
+        {
+            "output_path": summary.output_path,
+            "n_rows": summary.n_rows,
+            "n_files": summary.n_files,
+            "groups": summary.groups,
+        }
+    )

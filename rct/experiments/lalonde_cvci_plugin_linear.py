@@ -21,9 +21,10 @@ from datetime import date
 
 import numpy as np
 import pandas as pd
+from rct.experiments.data_interface import get_lalonde_dataframe
 
-from rct.causal_sim import compute_exp_minmizer, lalonde_get_data
-from rct.cvci_plugins import build_obs_plugin, fit_base_cvci, fit_cvci_with_plugin
+from rct.models import compute_exp_minmizer, lalonde_get_data
+from rct.plugins import build_obs_plugin, fit_base_cvci, fit_cvci_with_plugin
 
 
 DEFAULT_VARIABLES = ["re75"]
@@ -112,7 +113,7 @@ def compute_ground_truth_payload(df: pd.DataFrame, variables, ground_truth_group
 
 def main():
     args = parse_args()
-    df = pd.read_csv("lalonde.csv")
+    df = get_lalonde_dataframe()
     df["age2"] = df["age"] ** 2
 
     variables = DEFAULT_VARIABLES if args.variables is None else args.variables

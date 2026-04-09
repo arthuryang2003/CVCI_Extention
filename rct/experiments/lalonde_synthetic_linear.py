@@ -17,8 +17,9 @@ import pickle
 import json
 from datetime import date
 import os
-from rct.causal_sim import model_class, compute_exp_minmizer, L_exp, L_obs, combined_loss, cross_validation, true_pi_func, tilde_pi_func, lalonde_get_data, generate_data
+from rct.models import model_class, compute_exp_minmizer, L_exp, L_obs, combined_loss, cross_validation, true_pi_func, tilde_pi_func, lalonde_get_data, generate_data
 import pandas as pd
+from rct.experiments.data_interface import get_lalonde_dataframe
 from sklearn.linear_model import LinearRegression 
 import argparse
 
@@ -40,7 +41,7 @@ args = parser.parse_args()
 group = args.group
 variables = args.variables
 
-df = pd.read_csv('lalonde.csv')
+df = get_lalonde_dataframe()
 df['age2'] = df['age'] ** 2
 
 n_sims = 100 # number of simulations, 5000 in the paper

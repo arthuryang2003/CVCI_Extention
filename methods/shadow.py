@@ -1,9 +1,16 @@
-"""Core shadow-variable implementation shared by CVCI and RHC hosts."""
+"""Formal shadow-recovery core for source-selection correction.
+
+Mathematical mapping:
+- ``model_f_t1 / model_f_t0``: baseline outcome distributions ``p(y|G=1, Xc, Xz, T=t)``.
+- ``model_g_y``: source model ``P(G=1|Xc, T, Y)`` used in shadow recovery weights.
+- ``mu_t^shadow``: Monte Carlo normalized weighted expectation under shadow recovery.
+- ``tau_shadow = mu1_shadow - mu0_shadow``.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -11,86 +18,108 @@ from sklearn.linear_model import LinearRegression, LogisticRegression
 
 from utils.screening_utils import partial_abs_corr
 
-
-@dataclass
-class ConditionalGaussianModel:
-    """Gaussian conditional model: linear mean + homoskedastic residual std."""
-
-    feature_cols: List[str]
-    y_col: str
-    mean_model: LinearRegression
-    residual_sigma: float
-
-    def predict_mean(self, x: np.ndarray) -> np.ndarray:
-        x = np.asarray(x, dtype=float)
-        if x.ndim == 1:
-            x = x.reshape(1, -1)
-        return self.mean_model.predict(x)
-
-    def sample(self, x: np.ndarray, n_samples: int = 2000, rng: Optional[np.random.Generator] = None) -> np.ndarray:
-        x = np.asarray(x, dtype=float)
-        if x.ndim == 1:
-            x = x.reshape(1, -1)
-        if x.shape[0] != 1:
-            raise ValueError("ConditionalGaussianModel.sample currently expects exactly one row.")
-        means = np.repeat(self.predict_mean(x), int(n_samples))
-        if rng is None:
-            rng = np.random.default_rng()
-        return means + self.residual_sigma * rng.standard_normal(int(n_samples))
+ArrayLike = Union[np.ndarray, pd.Series, Sequence[float]]
 
 
-def clip_prob(p: np.ndarray, eps: float = 1e-6) -> np.ndarray:
-    """Clip probabilities into [eps, 1-eps]."""
-    return np.clip(np.asarray(p, dtype=float), eps, 1.0 - eps)
+def _to_1d_float(values: ArrayLike) -> np.ndarray:
+    return np.asarray(values, dtype=float).reshape(-1)
+
+
+def _to_2d_float(values: Union[np.ndarray, pd.DataFrame, Sequence[float]]) -> np.ndarray:
+    arr = np.asarray(values, dtype=float)
+    if arr.ndim == 1:
+        arr = arr.reshape(1, -1)
+    if arr.ndim != 2:
+        raise ValueError(f"Expected 2D input, got shape={arr.shape}.")
+    return arr
+
+
+def clip_prob(p: Union[float, np.ndarray], eps: float = 1e-6) -> Union[float, np.ndarray]:
+    """Clip probability/probabilities into ``[eps, 1-eps]``."""
+    clipped = np.clip(np.asarray(p, dtype=float), eps, 1.0 - eps)
+    if np.asarray(p).ndim == 0:
+        return float(clipped.reshape(-1)[0])
+    return clipped
 
 
 def fit_classifier(
-    df: pd.DataFrame,
-    feature_cols: Sequence[str],
-    target_col: str,
+    X: Union[np.ndarray, pd.DataFrame],
+    y: ArrayLike,
     max_iter: int = 2000,
 ) -> LogisticRegression:
-    """Fit logistic regression classifier with probabilistic output."""
-    x = df[list(feature_cols)].to_numpy(dtype=float)
-    y = df[target_col].to_numpy(dtype=float)
-    if np.unique(y).size < 2:
-        raise ValueError(f"Cannot fit classifier for {target_col}: only one class present.")
+    """Fit source classifier with explicit empty/degenerate-class checks."""
+    x_mat = _to_2d_float(X)
+    y_vec = _to_1d_float(y)
+    if x_mat.shape[0] == 0:
+        raise ValueError("Cannot fit classifier on empty data.")
+    if x_mat.shape[0] != y_vec.shape[0]:
+        raise ValueError(f"X/y row mismatch: {x_mat.shape[0]} vs {y_vec.shape[0]}.")
+    if np.unique(y_vec).size < 2:
+        raise ValueError("Cannot fit classifier: y has fewer than 2 classes.")
+
     model = LogisticRegression(max_iter=max_iter)
-    model.fit(x, y)
+    model.fit(x_mat, y_vec)
     return model
 
 
-def predict_prob(model: LogisticRegression, x: np.ndarray) -> np.ndarray:
-    """Predict class-1 probability from a fitted classifier."""
-    x = np.asarray(x, dtype=float)
-    if x.ndim == 1:
-        x = x.reshape(1, -1)
-    return model.predict_proba(x)[:, 1]
+def predict_prob(model: LogisticRegression, x: Union[np.ndarray, Sequence[float]]) -> Union[float, np.ndarray]:
+    """Predict class-1 probability for one sample or a batch."""
+    x_mat = _to_2d_float(x)
+    p = model.predict_proba(x_mat)[:, 1]
+    return float(p[0]) if p.shape[0] == 1 else p
+
+
+@dataclass
+class ConditionalGaussianModel:
+    """Continuous-Y conditional model: linear mean + homoskedastic Gaussian residual."""
+
+    feature_cols: List[str]
+    mean_model: LinearRegression
+    residual_sigma: float
+
+    def predict_mean(self, x: Union[np.ndarray, Sequence[float]]) -> np.ndarray:
+        return self.mean_model.predict(_to_2d_float(x))
+
+    def sample(
+        self,
+        x: Union[np.ndarray, Sequence[float]],
+        n_samples: int = 2000,
+        rng: Optional[np.random.Generator] = None,
+    ) -> np.ndarray:
+        """Sample ``Y`` from Normal(mean(x), sigma^2) for one conditioning row."""
+        x_mat = _to_2d_float(x)
+        if x_mat.shape[0] != 1:
+            raise ValueError("ConditionalGaussianModel.sample expects exactly one conditioning row.")
+        if n_samples <= 0:
+            raise ValueError("n_samples must be positive.")
+        if rng is None:
+            rng = np.random.default_rng()
+        mean_val = float(self.predict_mean(x_mat)[0])
+        return mean_val + float(self.residual_sigma) * rng.standard_normal(int(n_samples))
 
 
 def fit_conditional_distribution_model(
-    df: pd.DataFrame,
-    feature_cols: Sequence[str],
-    y_col: str,
+    X: Union[np.ndarray, pd.DataFrame],
+    y: ArrayLike,
+    feature_cols: Optional[Sequence[str]] = None,
 ) -> ConditionalGaussianModel:
-    """Fit linear-mean Gaussian conditional distribution model for continuous outcomes."""
-    x = df[list(feature_cols)].to_numpy(dtype=float)
-    y = df[y_col].to_numpy(dtype=float)
-    if y.size == 0:
-        raise ValueError("Cannot fit conditional distribution model: empty training set.")
+    """Fit continuous-Y baseline conditional distribution model."""
+    x_mat = _to_2d_float(X)
+    y_vec = _to_1d_float(y)
+    if x_mat.shape[0] == 0:
+        raise ValueError("Cannot fit conditional distribution model on empty data.")
+    if x_mat.shape[0] != y_vec.shape[0]:
+        raise ValueError(f"X/y row mismatch: {x_mat.shape[0]} vs {y_vec.shape[0]}.")
 
-    mean_model = LinearRegression()
-    mean_model.fit(x, y)
-    residuals = y - mean_model.predict(x)
-    sigma = float(np.std(residuals, ddof=1)) if y.size > 1 else 0.0
+    model = LinearRegression()
+    model.fit(x_mat, y_vec)
+    residual = y_vec - model.predict(x_mat)
+    sigma = float(np.std(residual, ddof=1)) if y_vec.shape[0] > 1 else 0.0
     sigma = max(sigma, 1e-6)
 
-    return ConditionalGaussianModel(
-        feature_cols=list(feature_cols),
-        y_col=y_col,
-        mean_model=mean_model,
-        residual_sigma=sigma,
-    )
+    if feature_cols is None:
+        feature_cols = [f"x{i}" for i in range(x_mat.shape[1])]
+    return ConditionalGaussianModel(feature_cols=list(feature_cols), mean_model=model, residual_sigma=sigma)
 
 
 def screen_shadow_candidates(
@@ -104,75 +133,68 @@ def screen_shadow_candidates(
     allow_empty_fallback: bool = False,
 ) -> Dict[str, object]:
     """
-    Screen shadow variables from X_cols.
+    Heuristic shadow-variable screening over all candidate covariates.
 
-    Conditions:
-    - Relevance: association with Y conditional on T and remaining X.
-    - Shadow-independence: near-independence with G conditional on Y, T, and remaining X.
+    - relevance proxy: association with outcome ``Y`` given ``T`` and remaining covariates
+    - independence proxy: weak association with source ``G`` given ``Y, T`` and remaining covariates
     """
-    x_cols = list(X_cols)
-    missing = [c for c in [*x_cols, t_col, y_col, g_col] if c not in df.columns]
+    x_cols = [str(c) for c in X_cols]
+    required = [*x_cols, t_col, y_col, g_col]
+    missing = [c for c in required if c not in df.columns]
     if missing:
         raise ValueError(f"Missing required columns for shadow screening: {missing}")
     if not x_cols:
-        raise ValueError("X_cols must be non-empty for shadow screening.")
+        raise ValueError("X_cols must be non-empty.")
 
+    t_vec = _to_1d_float(df[t_col])
+    y_vec = _to_1d_float(df[y_col])
+    g_vec = _to_1d_float(df[g_col])
+
+    selected: List[str] = []
     logs: List[Dict[str, object]] = []
-    selected_shadow_cols: List[str] = []
-
-    t_vec = df[t_col].to_numpy(dtype=float)
-    y_vec = df[y_col].to_numpy(dtype=float)
-    g_vec = df[g_col].to_numpy(dtype=float)
 
     for col in x_cols:
         remaining = [x for x in x_cols if x != col]
-        z_vec = df[col].to_numpy(dtype=float)
+        z_vec = _to_1d_float(df[col])
 
         nuisance_rel_parts = [t_vec.reshape(-1, 1)]
-        if remaining:
-            nuisance_rel_parts.append(df[remaining].to_numpy(dtype=float))
-        nuisance_rel = np.hstack(nuisance_rel_parts)
-
         nuisance_ind_parts = [y_vec.reshape(-1, 1), t_vec.reshape(-1, 1)]
         if remaining:
-            nuisance_ind_parts.append(df[remaining].to_numpy(dtype=float))
-        nuisance_ind = np.hstack(nuisance_ind_parts)
+            remain_mat = df[remaining].to_numpy(dtype=float)
+            nuisance_rel_parts.append(remain_mat)
+            nuisance_ind_parts.append(remain_mat)
 
-        relevance_score = float(partial_abs_corr(z_vec, y_vec, nuisance_rel))
-        independence_score = float(partial_abs_corr(z_vec, g_vec, nuisance_ind))
-        passed = bool(relevance_score >= relevance_threshold and independence_score <= independence_threshold)
+        rel = float(partial_abs_corr(z_vec, y_vec, np.hstack(nuisance_rel_parts)))
+        ind = float(partial_abs_corr(z_vec, g_vec, np.hstack(nuisance_ind_parts)))
+        passed = bool(rel >= relevance_threshold and ind <= independence_threshold)
         if passed:
-            selected_shadow_cols.append(col)
+            selected.append(col)
 
         logs.append(
             {
                 "column": col,
-                "relevance_score": relevance_score,
-                "independence_score": independence_score,
+                "relevance_score": rel,
+                "independence_score": ind,
                 "selected": passed,
                 "relevance_threshold": float(relevance_threshold),
                 "independence_threshold": float(independence_threshold),
             }
         )
 
-    if not selected_shadow_cols:
-        if allow_empty_fallback:
-            best_idx = int(np.argmax([entry["relevance_score"] - entry["independence_score"] for entry in logs]))
-            selected_shadow_cols = [logs[best_idx]["column"]]
-            logs[best_idx]["selected"] = True
-            logs[best_idx]["fallback_selected"] = True
-        else:
-            raise ValueError(
-                "No feature in X_cols passed shadow screening. "
-                "Set allow_empty_fallback=True if you explicitly want fallback behavior."
-            )
+    if not selected:
+        if not allow_empty_fallback:
+            raise ValueError("No shadow candidate passed screening and fallback is disabled.")
+        best_idx = int(np.argmax([entry["relevance_score"] - entry["independence_score"] for entry in logs]))
+        selected = [logs[best_idx]["column"]]
+        logs[best_idx]["selected"] = True
+        logs[best_idx]["fallback_selected"] = True
 
-    selected_set = set(selected_shadow_cols)
-    xc_cols = [x for x in x_cols if x not in selected_set]
-
+    xz_set = set(selected)
+    xc_cols = [x for x in x_cols if x not in xz_set]
     return {
-        "selected_shadow_cols": selected_shadow_cols,
+        "selected_shadow_cols": selected,
         "Xc_cols": xc_cols,
+        "Xz_cols": selected,
         "screening_logs": logs,
         "relevance_threshold": float(relevance_threshold),
         "independence_threshold": float(independence_threshold),
@@ -180,25 +202,59 @@ def screen_shadow_candidates(
     }
 
 
+def _resolve_xc_xz(
+    Xc_cols: Optional[Sequence[str]] = None,
+    Xz_cols: Optional[Sequence[str]] = None,
+    *,
+    X_cols: Optional[Sequence[str]] = None,
+    selected_shadow_cols: Optional[Sequence[str]] = None,
+) -> Tuple[List[str], List[str]]:
+    """Resolve canonical ``Xc_cols/Xz_cols`` while keeping old interface compatibility."""
+    if X_cols is not None:
+        all_cols = [str(c) for c in X_cols]
+        z_cols = [str(c) for c in (selected_shadow_cols or [])]
+        if not z_cols:
+            raise ValueError("selected_shadow_cols must be provided when using X_cols compatibility path.")
+        invalid = [c for c in z_cols if c not in all_cols]
+        if invalid:
+            raise ValueError(f"selected_shadow_cols must be subset of X_cols, invalid={invalid}")
+        z_set = set(z_cols)
+        c_cols = [c for c in all_cols if c not in z_set]
+        return c_cols, z_cols
+
+    if Xc_cols is None or Xz_cols is None:
+        raise ValueError("Either provide (Xc_cols, Xz_cols) or (X_cols, selected_shadow_cols).")
+    return [str(c) for c in Xc_cols], [str(c) for c in Xz_cols]
+
+
 def fit_shadow_pipeline(
     df: pd.DataFrame,
-    X_cols: Sequence[str],
-    selected_shadow_cols: Sequence[str],
+    Xc_cols: Optional[Sequence[str]] = None,
+    Xz_cols: Optional[Sequence[str]] = None,
     t_col: str = "T",
     y_col: str = "Y",
     g_col: str = "G",
+    *,
+    X_cols: Optional[Sequence[str]] = None,
+    selected_shadow_cols: Optional[Sequence[str]] = None,
 ) -> Dict[str, object]:
-    """Fit all models needed for shadow-based recovery."""
-    x_cols = list(X_cols)
-    xs_cols = list(selected_shadow_cols)
-    if not xs_cols:
-        raise ValueError("selected_shadow_cols must be non-empty for fit_shadow_pipeline.")
-    invalid = [c for c in xs_cols if c not in x_cols]
-    if invalid:
-        raise ValueError(f"selected_shadow_cols must be subset of X_cols, invalid: {invalid}")
+    """
+    Fit all models needed for shadow-based recovery.
 
-    xc_cols = [x for x in x_cols if x not in set(xs_cols)]
-    dist_feature_cols = xc_cols + xs_cols
+    Primary interface uses ``Xc_cols/Xz_cols``.
+    Compatibility interface ``X_cols + selected_shadow_cols`` is also supported.
+    """
+    xc_cols, xz_cols = _resolve_xc_xz(
+        Xc_cols=Xc_cols,
+        Xz_cols=Xz_cols,
+        X_cols=X_cols,
+        selected_shadow_cols=selected_shadow_cols,
+    )
+
+    required = [*xc_cols, *xz_cols, t_col, y_col, g_col]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns for fit_shadow_pipeline: {missing}")
 
     df_rct = df[df[g_col] == 1].copy()
     if df_rct.empty:
@@ -207,190 +263,204 @@ def fit_shadow_pipeline(
     df_rct_t1 = df_rct[df_rct[t_col] == 1].copy()
     df_rct_t0 = df_rct[df_rct[t_col] == 0].copy()
     if df_rct_t1.empty or df_rct_t0.empty:
-        raise ValueError("RCT rows must include both treatment arms for shadow pipeline.")
+        raise ValueError("RCT rows must contain both treatment arms (T=1 and T=0).")
 
-    model_f_t1 = fit_conditional_distribution_model(df_rct_t1, dist_feature_cols, y_col=y_col)
-    model_f_t0 = fit_conditional_distribution_model(df_rct_t0, dist_feature_cols, y_col=y_col)
+    dist_cols = list(dict.fromkeys(xc_cols + xz_cols))
+    model_f_t1 = fit_conditional_distribution_model(
+        X=df_rct_t1[dist_cols], y=df_rct_t1[y_col], feature_cols=dist_cols
+    )
+    model_f_t0 = fit_conditional_distribution_model(
+        X=df_rct_t0[dist_cols], y=df_rct_t0[y_col], feature_cols=dist_cols
+    )
 
-    gy_feature_cols = xc_cols + [t_col, y_col]
-    model_g_y = fit_classifier(df, gy_feature_cols, g_col)
+    gy_cols = list(dict.fromkeys(xc_cols + [t_col, y_col]))
+    model_g_y = fit_classifier(df[gy_cols], df[g_col])
 
-    gxs_feature_cols = xc_cols + [t_col] + xs_cols
-    model_g_xs = fit_classifier(df, gxs_feature_cols, g_col)
+    gxz_cols = list(dict.fromkeys(xc_cols + [t_col] + xz_cols))
+    model_g_xz = fit_classifier(df[gxz_cols], df[g_col])
 
     return {
         "model_f_t1": model_f_t1,
         "model_f_t0": model_f_t0,
         "model_g_y": model_g_y,
-        "model_g_xs": model_g_xs,
-        "X_cols": x_cols,
+        "model_g_xz": model_g_xz,
         "Xc_cols": xc_cols,
-        "Xs_cols": xs_cols,
-        "dist_feature_cols": dist_feature_cols,
-        "g_y_feature_cols": gy_feature_cols,
-        "g_xs_feature_cols": gxs_feature_cols,
+        "Xz_cols": xz_cols,
+        "dist_feature_cols": dist_cols,
+        "g_y_feature_cols": gy_cols,
+        "g_xz_feature_cols": gxz_cols,
+        # backward compatibility alias
+        "Xs_cols": xz_cols,
         "t_col": t_col,
         "y_col": y_col,
         "g_col": g_col,
     }
 
 
-def _split_x(
-    x_all: np.ndarray,
-    x_cols: Sequence[str],
-    selected_shadow_cols: Sequence[str],
-) -> Dict[str, np.ndarray]:
-    x_cols = list(x_cols)
-    xs_cols = list(selected_shadow_cols)
-    xc_cols = [x for x in x_cols if x not in set(xs_cols)]
-
-    x_all = np.asarray(x_all, dtype=float).reshape(-1)
-    if x_all.shape[0] != len(x_cols):
-        raise ValueError("x_all length must equal len(X_cols).")
-
-    lookup = {name: x_all[idx] for idx, name in enumerate(x_cols)}
-    xc_vec = np.asarray([lookup[col] for col in xc_cols], dtype=float)
-    xs_vec = np.asarray([lookup[col] for col in xs_cols], dtype=float)
-    return {"xc_vec": xc_vec, "xs_vec": xs_vec, "Xc_cols": xc_cols, "Xs_cols": xs_cols}
-
-
 def predict_mu_t_shadow(
     models: Dict[str, object],
-    xc_vec: np.ndarray,
-    xs_vec: np.ndarray,
+    xc_vec: ArrayLike,
+    xz_vec: ArrayLike,
     t: int,
     M: int = 2000,
+    random_state: Optional[int] = None,
     rng: Optional[np.random.Generator] = None,
 ) -> float:
-    """Predict mu_t^shadow(xc, xs) for continuous Y using Monte Carlo."""
-    if int(t) == 1:
-        model_f = models["model_f_t1"]
-    else:
-        model_f = models["model_f_t0"]
+    """
+    Predict ``mu_t^shadow(xc, xz)`` for continuous ``Y`` via Monte Carlo.
 
-    xc_vec = np.asarray(xc_vec, dtype=float).reshape(-1)
-    xs_vec = np.asarray(xs_vec, dtype=float).reshape(-1)
-    x_dist = np.concatenate([xc_vec, xs_vec], axis=0).reshape(1, -1)
+    Recovery weight for each sampled ``y``:
+    ``r_y = (1-s)/s``, where ``s = P(G=1|Xc, T=t, Y=y)``.
+    """
+    if int(t) not in (0, 1):
+        raise ValueError(f"t must be 0 or 1, got {t}")
+    if M <= 0:
+        raise ValueError("M must be positive.")
 
-    y_samples = model_f.sample(x_dist, n_samples=M, rng=rng)
+    if rng is None:
+        rng = np.random.default_rng(random_state)
 
-    g_y_features = np.column_stack(
+    model_f = models["model_f_t1"] if int(t) == 1 else models["model_f_t0"]
+    model_g_y = models["model_g_y"]
+
+    xc = _to_1d_float(xc_vec)
+    xz = _to_1d_float(xz_vec)
+    y_samples = _to_1d_float(model_f.sample(np.concatenate([xc, xz]), n_samples=M, rng=rng))
+
+    gy_rows = np.column_stack(
         [
-            np.repeat(xc_vec.reshape(1, -1), int(M), axis=0),
+            np.repeat(xc.reshape(1, -1), int(M), axis=0),
             np.full((int(M), 1), float(t)),
             y_samples.reshape(-1, 1),
         ]
     )
-    s = predict_prob(models["model_g_y"], g_y_features)
-    s = clip_prob(s)
+    s = _to_1d_float(predict_prob(model_g_y, gy_rows))
+    s = _to_1d_float(clip_prob(s))
     r_y = (1.0 - s) / s
 
     denom = float(np.sum(r_y))
-    if denom <= 0:
-        raise ValueError("Invalid Monte Carlo denominator while computing mu_t_shadow.")
-    return float(np.sum(y_samples * r_y) / denom)
+    if not np.isfinite(denom) or denom <= 0:
+        raise ValueError(f"Invalid Monte Carlo denominator in predict_mu_t_shadow: {denom}")
+
+    numerator = float(np.sum(y_samples * r_y))
+    if not np.isfinite(numerator):
+        raise ValueError("Invalid Monte Carlo numerator in predict_mu_t_shadow.")
+
+    return float(numerator / denom)
 
 
 def predict_tau_shadow(
     models: Dict[str, object],
-    xc_vec: np.ndarray,
-    xs_vec: np.ndarray,
+    xc_vec: ArrayLike,
+    xz_vec: ArrayLike,
     M: int = 2000,
+    random_state: Optional[int] = None,
     rng: Optional[np.random.Generator] = None,
 ) -> Dict[str, float]:
-    """Predict shadow-corrected treatment effect for one sample."""
-    mu1_shadow = predict_mu_t_shadow(models, xc_vec=xc_vec, xs_vec=xs_vec, t=1, M=M, rng=rng)
-    mu0_shadow = predict_mu_t_shadow(models, xc_vec=xc_vec, xs_vec=xs_vec, t=0, M=M, rng=rng)
-    tau_shadow = float(mu1_shadow - mu0_shadow)
-    return {
-        "mu1_shadow": float(mu1_shadow),
-        "mu0_shadow": float(mu0_shadow),
-        "tau_shadow": tau_shadow,
-    }
+    """Compute ``tau_shadow = mu1_shadow - mu0_shadow`` for one sample."""
+    if rng is None:
+        rng = np.random.default_rng(random_state)
+
+    mu1 = predict_mu_t_shadow(models, xc_vec=xc_vec, xz_vec=xz_vec, t=1, M=M, rng=rng)
+    mu0 = predict_mu_t_shadow(models, xc_vec=xc_vec, xz_vec=xz_vec, t=0, M=M, rng=rng)
+    tau = float(mu1 - mu0)
+    return {"mu1_shadow": float(mu1), "mu0_shadow": float(mu0), "tau_shadow": tau}
 
 
 def build_shadow_obs_outcomes_for_cvci(
     df_obs: pd.DataFrame,
     shadow_models: Dict[str, object],
-    X_cols: Sequence[str],
-    selected_shadow_cols: Sequence[str],
+    Xc_cols: Optional[Sequence[str]] = None,
+    Xz_cols: Optional[Sequence[str]] = None,
     t_col: str = "T",
     M: int = 2000,
     random_state: int = 2024,
+    *,
+    X_cols: Optional[Sequence[str]] = None,
+    selected_shadow_cols: Optional[Sequence[str]] = None,
 ) -> np.ndarray:
-    """Build shadow-corrected observational outcomes for CVCI L_obs."""
-    x_cols = list(X_cols)
-    xs_cols = list(selected_shadow_cols)
+    """Build shadow-corrected observational outcomes for CVCI ``L_obs`` substitution."""
+    xc_cols, xz_cols = _resolve_xc_xz(
+        Xc_cols=Xc_cols,
+        Xz_cols=Xz_cols,
+        X_cols=X_cols,
+        selected_shadow_cols=selected_shadow_cols,
+    )
 
-    obs_outcomes = np.zeros(df_obs.shape[0], dtype=float)
+    if t_col not in df_obs.columns:
+        raise ValueError(f"Missing treatment column in df_obs: {t_col}")
+
     rng = np.random.default_rng(random_state)
-
+    out = np.zeros(df_obs.shape[0], dtype=float)
     for idx, (_, row) in enumerate(df_obs.iterrows()):
-        x_all = row[x_cols].to_numpy(dtype=float)
-        split = _split_x(x_all, x_cols=x_cols, selected_shadow_cols=xs_cols)
-        mu_t = predict_mu_t_shadow(
+        out[idx] = predict_mu_t_shadow(
             shadow_models,
-            xc_vec=split["xc_vec"],
-            xs_vec=split["xs_vec"],
+            xc_vec=row[xc_cols].to_numpy(dtype=float) if xc_cols else np.asarray([], dtype=float),
+            xz_vec=row[xz_cols].to_numpy(dtype=float) if xz_cols else np.asarray([], dtype=float),
             t=int(row[t_col]),
             M=M,
             rng=rng,
         )
-        obs_outcomes[idx] = mu_t
-
-    return obs_outcomes
+    return out
 
 
 def build_shadow_corrected_targets_for_rhc(
     df_rct: pd.DataFrame,
     shadow_models: Dict[str, object],
     w_hat_rct: np.ndarray,
-    X_cols: Sequence[str],
-    selected_shadow_cols: Sequence[str],
+    Xc_cols: Optional[Sequence[str]] = None,
+    Xz_cols: Optional[Sequence[str]] = None,
     t_col: str = "T",
     M: int = 2000,
     random_state: int = 2024,
+    *,
+    X_cols: Optional[Sequence[str]] = None,
+    selected_shadow_cols: Optional[Sequence[str]] = None,
 ) -> Dict[str, object]:
-    """Build corrected second-stage targets for RHC: tau_shadow - w_hat."""
-    x_cols = list(X_cols)
-    xs_cols = list(selected_shadow_cols)
+    """Build RHC second-stage corrected target: ``corrected_target = tau_shadow - w_hat``."""
+    xc_cols, xz_cols = _resolve_xc_xz(
+        Xc_cols=Xc_cols,
+        Xz_cols=Xz_cols,
+        X_cols=X_cols,
+        selected_shadow_cols=selected_shadow_cols,
+    )
 
-    w_hat_rct = np.asarray(w_hat_rct, dtype=float).reshape(-1)
-    if w_hat_rct.shape[0] != df_rct.shape[0]:
-        raise ValueError("w_hat_rct length must match df_rct rows.")
+    w_hat = _to_1d_float(w_hat_rct)
+    if w_hat.shape[0] != df_rct.shape[0]:
+        raise ValueError(f"w_hat_rct length mismatch: {w_hat.shape[0]} vs {df_rct.shape[0]}")
 
+    rng = np.random.default_rng(random_state)
     mu1_list: List[float] = []
     mu0_list: List[float] = []
     tau_list: List[float] = []
 
-    rng = np.random.default_rng(random_state)
-
     for _, row in df_rct.iterrows():
-        x_all = row[x_cols].to_numpy(dtype=float)
-        split = _split_x(x_all, x_cols=x_cols, selected_shadow_cols=xs_cols)
         tau_obj = predict_tau_shadow(
             shadow_models,
-            xc_vec=split["xc_vec"],
-            xs_vec=split["xs_vec"],
+            xc_vec=row[xc_cols].to_numpy(dtype=float) if xc_cols else np.asarray([], dtype=float),
+            xz_vec=row[xz_cols].to_numpy(dtype=float) if xz_cols else np.asarray([], dtype=float),
             M=M,
             rng=rng,
         )
-        mu1_list.append(tau_obj["mu1_shadow"])
-        mu0_list.append(tau_obj["mu0_shadow"])
-        tau_list.append(tau_obj["tau_shadow"])
+        mu1_list.append(float(tau_obj["mu1_shadow"]))
+        mu0_list.append(float(tau_obj["mu0_shadow"]))
+        tau_list.append(float(tau_obj["tau_shadow"]))
 
-    tau_shadow = np.asarray(tau_list, dtype=float)
-    corrected_targets = tau_shadow - w_hat_rct
+    tau_shadow = _to_1d_float(tau_list)
+    corrected_target = tau_shadow - w_hat
+
+    if np.any(~np.isfinite(corrected_target)):
+        raise ValueError("Non-finite corrected targets in shadow pipeline.")
 
     return {
-        "corrected_targets": corrected_targets,
+        "corrected_targets": corrected_target,
         "diagnostics": {
-            "mu1_shadow": np.asarray(mu1_list, dtype=float),
-            "mu0_shadow": np.asarray(mu0_list, dtype=float),
+            "mu1_shadow": _to_1d_float(mu1_list),
+            "mu0_shadow": _to_1d_float(mu0_list),
             "tau_shadow": tau_shadow,
             "mean_tau_shadow": float(np.mean(tau_shadow)),
             "std_tau_shadow": float(np.std(tau_shadow)),
-            "mean_corrected_target": float(np.mean(corrected_targets)),
-            "std_corrected_target": float(np.std(corrected_targets)),
+            "mean_corrected_target": float(np.mean(corrected_target)),
+            "std_corrected_target": float(np.std(corrected_target)),
         },
     }

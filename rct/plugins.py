@@ -606,7 +606,6 @@ def _build_iv_plugin(obs_data: np.ndarray, exp_data: np.ndarray, config: Dict[st
         t_col="T",
         y_col="Y",
         g_col="_G_IV",
-        y_ref=float(config.get("iv_y_ref", 0.0)),
         weight_clip_min=float(config.get("iv_clip_min", 0.05)),
         weight_clip_max=float(config.get("iv_clip_max", 20.0)),
         max_iter=int(config.get("iv_max_iter", 2000)),
@@ -668,10 +667,11 @@ def _build_shadow_plugin(obs_data: np.ndarray, exp_data: np.ndarray, config: Dic
         allow_empty_fallback=allow_empty_fallback,
     )
     selected_shadow_cols = list(screening["selected_shadow_cols"])
+    xc_cols = list(screening["Xc_cols"])
     shadow_models = fit_shadow_pipeline(
         df_all,
-        X_cols=covariate_names,
-        selected_shadow_cols=selected_shadow_cols,
+        Xc_cols=xc_cols,
+        Xz_cols=selected_shadow_cols,
         t_col="T",
         y_col="Y",
         g_col="G",
@@ -679,8 +679,8 @@ def _build_shadow_plugin(obs_data: np.ndarray, exp_data: np.ndarray, config: Dic
     pseudo_outcome = build_shadow_obs_outcomes_for_cvci(
         df_obs=df_obs,
         shadow_models=shadow_models,
-        X_cols=covariate_names,
-        selected_shadow_cols=selected_shadow_cols,
+        Xc_cols=xc_cols,
+        Xz_cols=selected_shadow_cols,
         t_col="T",
         M=mc_samples,
         random_state=random_state,
@@ -695,7 +695,7 @@ def _build_shadow_plugin(obs_data: np.ndarray, exp_data: np.ndarray, config: Dic
         metadata={
             "selected_shadow_cols": selected_shadow_cols,
             "Xc_cols": shadow_models["Xc_cols"],
-            "Xs_cols": shadow_models["Xs_cols"],
+            "Xz_cols": shadow_models["Xz_cols"],
             "screening_logs": screening["screening_logs"],
             "screening_summary": screening,
             "pseudo_outcome_mean": float(np.mean(pseudo_outcome)),

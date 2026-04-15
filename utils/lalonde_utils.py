@@ -154,6 +154,11 @@ def load_lalonde_split(
     """
     Unified Lalonde split entrypoint.
 
+    Current behavior note:
+    - The row split rule is currently identical for ``target_mode='rct'`` and ``target_mode='obs'``:
+      ``df_rct = treated + control`` and ``df_obs = treated + obs_source``.
+    - ``target_mode`` is kept for API consistency and reporting metadata.
+
     Returns standardized dataframes with columns:
     - X columns
     - T: treatment

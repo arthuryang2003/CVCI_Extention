@@ -1,4 +1,4 @@
-"""Selection-IV inspired plugin for OBS-target eta-model reweighting."""
+"""Selection-IV plugin for OBS-target second-stage reweighting."""
 
 from __future__ import annotations
 
@@ -10,19 +10,18 @@ import pandas as pd
 
 from methods.iv import fit_iv_pipeline, select_iv_candidates
 from methods.plugins.base import SelectionCorrectionPlugin
-from utils.weight_utils import ensure_1d_float, weight_summary
+from utils.weight_utils import ensure_1d_float, finalize_weights, weight_summary
 
 
 @dataclass
 class SelectionIVPlugin(SelectionCorrectionPlugin):
     """
-    Engineering first version of a selection-IV plugin.
+    Selection-IV plugin (source-selection IV, not treatment IV).
 
-    Notes:
-    - This uses selection IV ideas to correct source selection bias G.
-    - It is not a treatment-IV implementation.
-    - It provides IV-informed RCT reweighting for eta(x) fitting.
-    - Full nonparametric identification / semiparametric efficiency is intentionally deferred.
+    Workflow:
+    1. Screen IV candidates from covariates.
+    2. Fit formal IV pipeline to obtain per-sample source-selection correction weights.
+    3. Return RCT weights for OBS-target second-stage bias learning.
     """
 
     name: str = "selection_iv"
@@ -42,7 +41,12 @@ class SelectionIVPlugin(SelectionCorrectionPlugin):
 
     def fit(self, df_rct, df_obs, x_cols, a_col, y_col, g_col):
         df_all = pd.concat([df_rct, df_obs], axis=0, ignore_index=True)
-        candidate_cols = list(x_cols)
+        candidate_cols = list(self.iv_candidate_cols) if self.iv_candidate_cols is not None else list(x_cols)
+        if self.x_cols_for_iv_screen is not None:
+            candidate_cols = [c for c in candidate_cols if c in set(self.x_cols_for_iv_screen)]
+        if not candidate_cols:
+            raise ValueError("SelectionIVPlugin has empty candidate_cols after screening configuration.")
+
         screening_result = select_iv_candidates(
             df_all,
             candidate_cols=candidate_cols,
@@ -63,12 +67,11 @@ class SelectionIVPlugin(SelectionCorrectionPlugin):
             t_col=a_col,
             y_col=y_col,
             g_col=g_col,
-            y_ref=0.0,
             weight_clip_min=self.clip_min,
             weight_clip_max=self.clip_max,
         )
         weights = ensure_1d_float(all_weights[: df_rct.shape[0]])
-        weights = weights / np.mean(weights)
+        weights = finalize_weights(weights, clip_min=self.clip_min, clip_max=self.clip_max, normalize=True)
 
         if np.any(~np.isfinite(weights)):
             raise ValueError("SelectionIVPlugin produced non-finite weights.")

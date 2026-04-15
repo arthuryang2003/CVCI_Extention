@@ -1,4 +1,4 @@
-"""Shadow plugin wrapper using the shared methods.shadow pipeline."""
+"""Shadow plugin wrapper for OBS-target second-stage corrected targets."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from methods.shadow import (
 
 @dataclass
 class ShadowPlugin(SelectionCorrectionPlugin):
-    """Shadow plugin for OBS-target RHC: modifies only second-stage n(x) targets."""
+    """Shadow plugin for OBS-target RHC: modifies second-stage bias target ``tau_shadow - w_hat``."""
 
     name: str = "shadow"
     shadow_candidate_cols: Optional[Sequence[str]] = None
@@ -64,11 +64,13 @@ class ShadowPlugin(SelectionCorrectionPlugin):
             allow_empty_fallback=bool(self.allow_empty_fallback),
         )
         selected_shadow_cols = list(screening["selected_shadow_cols"])
+        xc_cols = list(screening["Xc_cols"])
+        xz_cols = list(selected_shadow_cols)
 
         shadow_models = fit_shadow_pipeline(
             df_all,
-            X_cols=x_cols,
-            selected_shadow_cols=selected_shadow_cols,
+            Xc_cols=xc_cols,
+            Xz_cols=xz_cols,
             t_col=a_col,
             y_col=y_col,
             g_col=g_col,
@@ -77,7 +79,7 @@ class ShadowPlugin(SelectionCorrectionPlugin):
         self.shadow_models_ = shadow_models
         self.selected_shadow_cols_ = selected_shadow_cols
         self.xc_cols_ = list(shadow_models["Xc_cols"])
-        self.xs_cols_ = list(shadow_models["Xs_cols"])
+        self.xz_cols_ = list(shadow_models["Xz_cols"])
         self.x_cols_ = x_cols
         self.a_col_ = a_col
         self.y_col_ = y_col
@@ -88,7 +90,7 @@ class ShadowPlugin(SelectionCorrectionPlugin):
             "plugin": self.name,
             "selected_shadow_cols": self.selected_shadow_cols_,
             "Xc_cols": self.xc_cols_,
-            "Xs_cols": self.xs_cols_,
+            "Xz_cols": self.xz_cols_,
             "screening_logs": screening["screening_logs"],
             "screening": screening,
             "shadow_mc_samples": int(self.shadow_mc_samples),
@@ -115,8 +117,8 @@ class ShadowPlugin(SelectionCorrectionPlugin):
             df_rct=df_rct,
             shadow_models=self.shadow_models_,
             w_hat_rct=np.asarray(base_w_hat, dtype=float),
-            X_cols=self.x_cols_,
-            selected_shadow_cols=self.selected_shadow_cols_,
+            Xc_cols=self.xc_cols_,
+            Xz_cols=self.xz_cols_,
             t_col=self.a_col_,
             M=int(self.shadow_mc_samples),
             random_state=int(self.random_state),

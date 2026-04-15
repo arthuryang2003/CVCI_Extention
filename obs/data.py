@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
-from utils.lalonde_utils import OBS_DEFAULT_X_COLS, ensure_required_columns, load_lalonde_csv, split_obs_target_groups
+from utils.lalonde_utils import OBS_DEFAULT_X_COLS, load_lalonde_split
 
 
 DEFAULT_X_COLS = list(OBS_DEFAULT_X_COLS)
@@ -110,33 +110,29 @@ def load_lalonde_obs_target_data(
     Returns:
         ObsTargetDataBundle containing standardized `df_rct`, `df_obs`, `x_cols`, and metadata.
     """
-    raw_df = load_lalonde_csv(lalonde_path)
-    obs_source = str(obs_source).lower()
-
     if x_cols is None:
         x_cols = DEFAULT_X_COLS
     x_cols = list(x_cols)
     extra_feature_cols = [] if extra_feature_cols is None else list(extra_feature_cols)
     all_feature_cols = list(dict.fromkeys(x_cols + extra_feature_cols))
+    df_rct_split, df_obs_split, split_summary = load_lalonde_split(
+        target_mode="obs",
+        obs_source=obs_source,
+        x_cols=all_feature_cols,
+        lalonde_path=lalonde_path,
+    )
 
-    ensure_required_columns(raw_df, all_feature_cols + ["treatment", "re78", "group"], context="OBS-target loading")
-    df_rct_raw, df_obs_raw = split_obs_target_groups(raw_df, obs_source=obs_source)
+    df_rct = prepare_obs_target_dataframe(df_rct_split, x_cols=all_feature_cols, a_col="T", y_col="Y", g_col="G")
+    df_obs = prepare_obs_target_dataframe(df_obs_split, x_cols=all_feature_cols, a_col="T", y_col="Y", g_col="G")
 
-    df_rct_raw["G"] = 1
-    df_obs_raw["G"] = 0
-
-    df_rct = prepare_obs_target_dataframe(df_rct_raw, x_cols=all_feature_cols, a_col="treatment", y_col="re78", g_col="G")
-    df_obs = prepare_obs_target_dataframe(df_obs_raw, x_cols=all_feature_cols, a_col="treatment", y_col="re78", g_col="G")
-
-    metadata = {
-        "lalonde_path": lalonde_path,
-        "obs_source": obs_source,
-        "n_rct": int(df_rct.shape[0]),
-        "n_obs": int(df_obs.shape[0]),
-        "n_rct_treated": int(df_rct["A"].sum()),
-        "n_rct_control": int((1 - df_rct["A"]).sum()),
-        "n_obs_treated": int(df_obs["A"].sum()),
-        "n_obs_control": int((1 - df_obs["A"]).sum()),
-    }
+    metadata = dict(split_summary)
+    metadata.update(
+        {
+            "n_rct_treated": int(df_rct["A"].sum()),
+            "n_rct_control": int((1 - df_rct["A"]).sum()),
+            "n_obs_treated": int(df_obs["A"].sum()),
+            "n_obs_control": int((1 - df_obs["A"]).sum()),
+        }
+    )
 
     return ObsTargetDataBundle(df_rct=df_rct, df_obs=df_obs, x_cols=x_cols, metadata=metadata)

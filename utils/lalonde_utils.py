@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Sequence, Tuple
 
 import pandas as pd
 
@@ -134,3 +134,57 @@ def ensure_required_columns(df: pd.DataFrame, required_cols: Sequence[str], cont
     missing_cols = [col for col in required_cols if col not in df.columns]
     if missing_cols:
         raise ValueError(f"Missing required columns for {context}: {missing_cols}")
+
+
+def load_lalonde_split(
+    target_mode: str,
+    obs_source: str,
+    x_cols: Sequence[str],
+    lalonde_path: str = "lalonde.csv",
+) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, object]]:
+    """
+    Unified Lalonde split entrypoint.
+
+    Returns standardized dataframes with columns:
+    - X columns
+    - T: treatment
+    - Y: outcome
+    - G: source indicator (RCT=1, OBS=0)
+    """
+    target_mode = str(target_mode).lower()
+    if target_mode not in {"rct", "obs"}:
+        raise ValueError(f"target_mode must be one of ['rct', 'obs'], got: {target_mode}")
+
+    obs_source = str(obs_source).lower()
+    x_cols = list(x_cols)
+    raw_df = load_lalonde_csv(lalonde_path)
+    ensure_required_columns(raw_df, x_cols + ["treatment", "re78", "group"], context="load_lalonde_split")
+
+    df_rct_raw, df_obs_raw = split_obs_target_groups(raw_df, obs_source=obs_source)
+    df_rct_raw = df_rct_raw.copy()
+    df_obs_raw = df_obs_raw.copy()
+    df_rct_raw["G"] = 1.0
+    df_obs_raw["G"] = 0.0
+
+    df_rct = df_rct_raw[x_cols + ["treatment", "re78", "G"]].copy()
+    df_obs = df_obs_raw[x_cols + ["treatment", "re78", "G"]].copy()
+    df_rct = df_rct.rename(columns={"treatment": "T", "re78": "Y"})
+    df_obs = df_obs.rename(columns={"treatment": "T", "re78": "Y"})
+    for frame in (df_rct, df_obs):
+        frame["T"] = frame["T"].astype(float)
+        frame["Y"] = frame["Y"].astype(float)
+        frame["G"] = frame["G"].astype(float)
+
+    summary = {
+        "target_mode": target_mode,
+        "obs_source": obs_source,
+        "lalonde_path": lalonde_path,
+        "n_rct": int(df_rct.shape[0]),
+        "n_obs": int(df_obs.shape[0]),
+        "n_rct_treated": int(df_rct["T"].sum()),
+        "n_rct_control": int((1.0 - df_rct["T"]).sum()),
+        "n_obs_treated": int(df_obs["T"].sum()),
+        "n_obs_control": int((1.0 - df_obs["T"]).sum()),
+        "x_cols": x_cols,
+    }
+    return df_rct, df_obs, summary

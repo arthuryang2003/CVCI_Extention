@@ -2,10 +2,16 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import numpy as np
+import pandas as pd
 from scipy.optimize import minimize
 from scipy.stats import pearsonr
 from sklearn.linear_model import LinearRegression, LogisticRegression
 
+from methods.shadow import (
+    build_shadow_obs_outcomes_for_cvci,
+    fit_shadow_pipeline,
+    screen_shadow_candidates,
+)
 from rct.models import cross_validation
 
 
@@ -606,45 +612,70 @@ def _build_shadow_plugin(obs_data: np.ndarray, exp_data: np.ndarray, config: Dic
     if d_obs is None or d_exp is None:
         raise ValueError("d_exp and d_obs must be provided in config for the shadow plugin.")
 
-    clip_min = float(config.get("shadow_clip_min", 1e-3))
-    clip_max = float(config.get("shadow_clip_max", 1 - 1e-3))
-    max_iter = int(config.get("shadow_max_iter", 1000))
+    if d_obs != d_exp:
+        raise ValueError("Shadow plugin currently requires d_obs == d_exp.")
+    covariate_names = _safe_column_names(config, d_obs)
+    relevance_threshold = float(config.get("shadow_association_threshold", 0.02))
+    independence_threshold = float(config.get("shadow_residual_independence_threshold", 0.02))
+    allow_empty_fallback = bool(config.get("shadow_allow_fallback", False))
+    mc_samples = int(config.get("shadow_mc_samples", 2000))
+    random_state = int(config.get("random_state", 2024))
 
-    fitted_shadow = _fit_shadow_score(obs_data, exp_data, config)
-    pseudo_outcome = fitted_shadow["pseudo_outcome"]
-    selection_model = fitted_shadow["selection_model"]
-    source_prob = fitted_shadow["selection_probabilities"]
-    source_prob = np.clip(source_prob, clip_min, clip_max)
-    corrected_score = np.log(source_prob / (1.0 - source_prob))
+    df_exp = pd.DataFrame(exp_data[:, :d_exp], columns=covariate_names)
+    df_exp["T"] = exp_data[:, d_exp].astype(float)
+    df_exp["Y"] = exp_data[:, -1].astype(float)
+    df_exp["G"] = 1.0
 
-    weights = np.ones(obs_data.shape[0], dtype=float)
+    df_obs = pd.DataFrame(obs_data[:, :d_obs], columns=covariate_names)
+    df_obs["T"] = obs_data[:, d_obs].astype(float)
+    df_obs["Y"] = obs_data[:, -1].astype(float)
+    df_obs["G"] = 0.0
+
+    df_all = pd.concat([df_exp, df_obs], axis=0, ignore_index=True)
+    screening = screen_shadow_candidates(
+        df_all,
+        X_cols=covariate_names,
+        t_col="T",
+        y_col="Y",
+        g_col="G",
+        relevance_threshold=relevance_threshold,
+        independence_threshold=independence_threshold,
+        allow_empty_fallback=allow_empty_fallback,
+    )
+    selected_shadow_cols = list(screening["selected_shadow_cols"])
+    shadow_models = fit_shadow_pipeline(
+        df_all,
+        X_cols=covariate_names,
+        selected_shadow_cols=selected_shadow_cols,
+        t_col="T",
+        y_col="Y",
+        g_col="G",
+    )
+    pseudo_outcome = build_shadow_obs_outcomes_for_cvci(
+        df_obs=df_obs,
+        shadow_models=shadow_models,
+        X_cols=covariate_names,
+        selected_shadow_cols=selected_shadow_cols,
+        t_col="T",
+        M=mc_samples,
+        random_state=random_state,
+    )
 
     return ObsPluginOutput(
         method="shadow",
-        sample_weights=weights,
+        sample_weights=np.ones(obs_data.shape[0], dtype=float),
         pseudo_outcome=pseudo_outcome,
-        corrected_score=corrected_score,
-        corrected_loss_component={"type": "shadow_pseudo_outcome_loss"},
+        corrected_score=None,
+        corrected_loss_component={"type": "shadow_obs_outcome_substitution"},
         metadata={
-            "shadow_model": fitted_shadow["calibration_model"],
-            "shadow_feature_names": fitted_shadow["score_feature_names"],
-            "selected_shadow_name": None,
-            "selected_shadow_index": None,
-            "screening_summary": None,
-            "shadow_score_mean": float(np.mean(fitted_shadow["shadow_score_obs"])),
-            "shadow_score_std": float(np.std(fitted_shadow["shadow_score_obs"])),
-            "shadow_score_min": float(np.min(fitted_shadow["shadow_score_obs"])),
-            "shadow_score_max": float(np.max(fitted_shadow["shadow_score_obs"])),
+            "selected_shadow_cols": selected_shadow_cols,
+            "Xc_cols": shadow_models["Xc_cols"],
+            "Xs_cols": shadow_models["Xs_cols"],
+            "screening_logs": screening["screening_logs"],
+            "screening_summary": screening,
             "pseudo_outcome_mean": float(np.mean(pseudo_outcome)),
             "pseudo_outcome_std": float(np.std(pseudo_outcome)),
-            "selection_model": selection_model,
-            "selection_probabilities": source_prob,
-            "selection_feature_names": fitted_shadow["score_feature_names"] + ["shadow_score"],
-            "relevance_pvalue": fitted_shadow["relevance_pvalue"],
-            "independence_pvalue": fitted_shadow["independence_pvalue"],
-            "positivity_score": fitted_shadow["positivity_score"],
-            "positivity_margin": fitted_shadow["positivity_margin"],
-            "shadow_score_weights": fitted_shadow["weights"],
-            "description": "OBS loss uses a learned [0,1] shadow score, calibrated back to outcome scale.",
+            "shadow_mc_samples": mc_samples,
+            "description": "Shadow correction replaces observational outcomes used by L_obs.",
         },
     )

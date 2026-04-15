@@ -41,7 +41,7 @@ def generate_data(n, d, true_mu_coef, true_te, pi_func, noise=0.1, rng=None):
 
 class model_class(torch.nn.Module):
     """ Class to define models. We use torch here to enable future extensions that require gradient descent"""
-    def __init__(self, mode='mean', d_exp=None, d_obs=None, exp_model='aipw', stratified_kfold=False, rng=None):
+    def __init__(self, mode='mean', d_exp=None, d_obs=None, exp_model='aipw', stratified_kfold=False, rng=None, fit_interactions=True):
         """ 
         Args:
             mode: 'mean' - no-covariate setting; 'linear' - linear setting
@@ -53,6 +53,7 @@ class model_class(torch.nn.Module):
                 'response_func' - the plug-in estimator using linear model; where the estimate is just the treatment coefficient
             stratified_kfold: True if stratify by treatment assignment when splitting data in cross-validation, False otherwise
             rng: random number generator
+            fit_interactions: in linear mode, whether obs model includes treatment-covariate interactions.
         """
         super(model_class, self).__init__()
         assert mode in ['mean', 'linear'], f"mode must be valid, got: {mode}"
@@ -64,13 +65,23 @@ class model_class(torch.nn.Module):
         self.exp_model = exp_model # for linear mode
         self.stratified_kfold = stratified_kfold 
         self.rng = rng
+        self.fit_interactions = fit_interactions
         if self.mode == 'linear':
             assert d_obs is not None, "number of covariates of obs (d_obs) must be specified in the linear setting"
-            self.theta_model = torch.nn.Parameter(torch.zeros(d_obs + 2))  # [Treatment coef, other coef, bias]      
+            n_coef = 1 + d_obs + (d_obs if self.fit_interactions else 0) + 1
+            self.theta_model = torch.nn.Parameter(torch.zeros(n_coef, dtype=torch.float64))
                     
     def forward(self):
         if self.mode == 'linear':
             return self.theta_model     
+
+    def _build_obs_design(self, Z, A):
+        a_col = torch.tensor(A, dtype=torch.float64).reshape(-1, 1)
+        z_tensor = torch.tensor(Z, dtype=torch.float64)
+        intercept = torch.ones((z_tensor.shape[0], 1), dtype=torch.float64)
+        if self.fit_interactions:
+            return torch.cat((a_col, z_tensor, a_col * z_tensor, intercept), dim=1)
+        return torch.cat((a_col, z_tensor, intercept), dim=1)
     
     def mean_est(self, lambda_, X_exp, X_obs):
         '''
@@ -102,14 +113,13 @@ class model_class(torch.nn.Module):
             beta_exp_precompute = compute_exp_minmizer(X_exp, mode=self.mode, exp_model=self.exp_model, d_exp=self.d_exp)
             if lambda_ == 0: 
                 # directly return minimizer of exp, since otherwise l_matrix is singular in close form solution 
-                padded_mini = torch.zeros(self.d_obs + 2)
+                padded_mini = torch.zeros_like(self.theta_model.detach())
                 padded_mini[0] = beta_exp_precompute
                 self.theta_model = torch.nn.Parameter(padded_mini)
                 return
             
             Z = X_obs[:, :self.d_obs]
             A = X_obs[:, self.d_obs]
-            intercept = torch.ones((X_obs.shape[0], 1))
             Y = X_obs[:, -1] if obs_outcomes is None else np.asarray(obs_outcomes, dtype=float).reshape(-1)
             if obs_weights is None:
                 obs_weights = np.ones(X_obs.shape[0], dtype=float)
@@ -117,27 +127,17 @@ class model_class(torch.nn.Module):
             obs_weights = obs_weights / np.mean(obs_weights)
             weight_tensor = torch.tensor(obs_weights, dtype=torch.float64).reshape(-1, 1)
             
-            A_Z = torch.cat((torch.tensor(A).reshape(-1, 1), torch.tensor(Z), intercept), dim=1) # n_obs * d+1
-            e1 = torch.zeros(self.d_obs + 1 + 1) # + intercept
+            design_obs = self._build_obs_design(Z, A)
+            e1 = torch.zeros(design_obs.shape[1], dtype=torch.float64)
             e1[0] = 1
             e1 = e1.reshape(-1, 1) # d+2 * 1
-            weighted_design = weight_tensor * A_Z
+            weighted_design = weight_tensor * design_obs
             weighted_outcome = weight_tensor * torch.tensor(Y, dtype=torch.float64).reshape(-1, 1)
-            l_matrix =  (1 - lambda_ ) * e1 @ e1.T + lambda_ / X_obs.shape[0] * A_Z.T @ weighted_design
-            r_matrix = (1 - lambda_ ) * beta_exp_precompute *  e1 + lambda_ / X_obs.shape[0] * A_Z.T @ weighted_outcome
+            l_matrix =  (1 - lambda_ ) * e1 @ e1.T + lambda_ / X_obs.shape[0] * design_obs.T @ weighted_design
+            r_matrix = (1 - lambda_ ) * beta_exp_precompute *  e1 + lambda_ / X_obs.shape[0] * design_obs.T @ weighted_outcome
             det = torch.det(l_matrix)
             if torch.isclose(det, torch.tensor(0.0, dtype=det.dtype), atol=1e-7):
-                # min norm solution closed-form 
-                if lambda_ == 1 and (np.array_equal(A, np.ones_like(A)) or np.array_equal(A, np.zeros_like(A))):
-                    # all treated or all untreated (multicollinearity)
-                    A_Z = torch.cat((torch.tensor(Z), intercept), dim=1)  # exclude treatment
-                    weighted_design = weight_tensor * A_Z
-                    l_matrix = lambda_ / X_obs.shape[0] * A_Z.T @ weighted_design
-                    r_matrix = lambda_ / X_obs.shape[0] * A_Z.T @ weighted_outcome
-                    solution = l_matrix.T @ (l_matrix @ l_matrix.T).inverse() @ r_matrix
-                    solution = torch.cat((torch.tensor([0.0]), solution.reshape(-1)), dim=0) # add 0 as treatment coef
-                else: 
-                    solution = l_matrix.T @ (l_matrix @ l_matrix.T).inverse() @ r_matrix
+                solution = torch.linalg.pinv(l_matrix) @ r_matrix
                 self.theta_model = torch.nn.Parameter(solution.reshape(-1))
             else:
                 solution = torch.linalg.solve(l_matrix, r_matrix)
@@ -157,6 +157,29 @@ class model_class(torch.nn.Module):
             return self.theta(lambda_, X_exp, X_obs)
         if self.mode == 'linear':
             return self.theta_model[0]
+
+    def predict_tau(self, X):
+        """
+        Predict per-sample treatment effect (CATE in linear-interaction form).
+        """
+        if self.mode != 'linear':
+            raise ValueError("predict_tau is only supported in linear mode.")
+        X = np.asarray(X, dtype=float)
+        if X.ndim == 1:
+            X = X.reshape(1, -1)
+        coef = self.theta_model.detach().cpu().numpy().reshape(-1)
+        coef_a = coef[0]
+        if self.fit_interactions:
+            coef_ax = coef[1 + self.d_obs : 1 + 2 * self.d_obs]
+        else:
+            coef_ax = np.zeros(self.d_obs, dtype=float)
+        return coef_a + X @ coef_ax
+
+    def estimate_ate(self, X):
+        """
+        Estimate average treatment effect over the provided feature matrix.
+        """
+        return float(np.mean(self.predict_tau(X)))
      
         
 def compute_exp_minmizer(X, mode='linear', exp_model='aipw', stratified_kfold=False, d_exp=None, rng=None): 
@@ -271,7 +294,17 @@ def L_obs(theta_model, X, mode='mean', d_obs=None, obs_weights=None, obs_outcome
         Z = X[:, :d_obs]
         A = X[:, d_obs]
         Y = X[:, -1] if obs_outcomes is None else torch.tensor(obs_outcomes, dtype=torch.float64).reshape(-1)
-        X_pred = torch.matmul(torch.cat([A.view(-1, 1), Z], dim=1), theta_model[:-1]) + theta_model[-1] 
+        n_non_intercept = int(theta_model.shape[0] - 1)
+        if n_non_intercept == 1 + 2 * d_obs:
+            design = torch.cat([A.view(-1, 1), Z, A.view(-1, 1) * Z], dim=1)
+        elif n_non_intercept == 1 + d_obs:
+            design = torch.cat([A.view(-1, 1), Z], dim=1)
+        else:
+            raise ValueError(
+                "Unexpected theta_model dimension in L_obs: "
+                f"{theta_model.shape[0]} for d_obs={d_obs}."
+            )
+        X_pred = torch.matmul(design, theta_model[:-1]) + theta_model[-1]
         sq_error = (X_pred - Y) ** 2
         if obs_weights is None:
             return torch.mean(sq_error)

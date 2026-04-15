@@ -38,6 +38,8 @@ def predict_linear(theta_opt, x_data, d):
     theta = theta_opt.theta_model.detach().cpu().numpy().reshape(-1)
     z = x_data[:, :d]
     a = x_data[:, d]
+    if theta.shape[0] == 2 * d + 2:
+        return theta[0] * a + z @ theta[1 : 1 + d] + (a.reshape(-1, 1) * z) @ theta[1 + d : 1 + 2 * d] + theta[-1]
     return theta[0] * a + z @ theta[1:-1] + theta[-1]
 
 

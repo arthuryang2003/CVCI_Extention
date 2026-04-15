@@ -22,12 +22,13 @@ from datetime import date
 import numpy as np
 import pandas as pd
 from rct.experiments.data_interface import get_lalonde_dataframe
+from utils.lalonde_utils import get_lalonde_default_covariates
 
 from rct.models import compute_exp_minmizer, lalonde_get_data
 from rct.plugins import build_obs_plugin, fit_base_cvci, fit_cvci_with_plugin
 
 
-DEFAULT_VARIABLES = ["re75"]
+DEFAULT_VARIABLES = None
 
 
 def variable_set_label(variables):
@@ -118,7 +119,7 @@ def main():
     df = get_lalonde_dataframe()
     df["age2"] = df["age"] ** 2
 
-    variables = DEFAULT_VARIABLES if args.variables is None else args.variables
+    variables = get_lalonde_default_covariates(df) if args.variables is None else args.variables
 
     x_exp, x_obs = lalonde_get_data(df, args.group, variables)
     ground_truth_payload = compute_ground_truth_payload(df, variables, args.ground_truth_group)

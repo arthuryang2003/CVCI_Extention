@@ -7,6 +7,7 @@ from scipy.optimize import minimize
 from scipy.stats import pearsonr
 from sklearn.linear_model import LinearRegression, LogisticRegression
 
+from methods.iv import fit_iv_pipeline, select_iv_candidates
 from methods.shadow import (
     build_shadow_obs_outcomes_for_cvci,
     fit_shadow_pipeline,
@@ -560,48 +561,72 @@ def _build_cw_plugin(obs_data: np.ndarray, exp_data: np.ndarray, config: Dict[st
 
 
 def _build_iv_plugin(obs_data: np.ndarray, exp_data: np.ndarray, config: Dict[str, Any]) -> ObsPluginOutput:
-    selection_summary = _select_iv_columns(obs_data, exp_data, config)
-    selected_indices = selection_summary["selected_indices"]
+    d_obs = config.get("d_obs")
+    d_exp = config.get("d_exp")
+    if d_obs is None or d_exp is None or d_obs != d_exp:
+        raise ValueError("IV plugin requires d_obs == d_exp and both provided.")
+    covariate_names = _safe_column_names(config, d_obs)
 
-    design_matrix, source, feature_names = _build_source_selection_design(
-        obs_data,
-        exp_data,
-        selected_indices,
-        config,
+    df_exp = pd.DataFrame(exp_data[:, :d_exp], columns=covariate_names)
+    df_exp["T"] = exp_data[:, d_exp].astype(float)
+    df_exp["Y"] = exp_data[:, -1].astype(float)
+    df_exp["G"] = 1.0
+
+    df_obs = pd.DataFrame(obs_data[:, :d_obs], columns=covariate_names)
+    df_obs["T"] = obs_data[:, d_obs].astype(float)
+    df_obs["Y"] = obs_data[:, -1].astype(float)
+    df_obs["G"] = 0.0
+
+    df_all = pd.concat([df_exp, df_obs], axis=0, ignore_index=True)
+    relevance_threshold = float(config.get("iv_relevance_alpha", 0.02))
+    exclusion_threshold = float(config.get("iv_exclusion_alpha", 0.02))
+    allow_fallback = bool(config.get("iv_allow_fallback", True))
+
+    screening = select_iv_candidates(
+        df_all,
+        candidate_cols=covariate_names,
+        t_col="T",
+        y_col="Y",
+        g_col="G",
+        relevance_threshold=relevance_threshold,
+        exclusion_threshold=exclusion_threshold,
+        allow_empty_fallback=allow_fallback,
     )
+    selected_iv_cols = list(screening["selected_iv_cols"])
+    xc_cols = list(screening["Xc_cols"])
 
-    clip_min = float(config.get("iv_clip_min", 1e-3))
-    clip_max = float(config.get("iv_clip_max", 1 - 1e-3))
-    max_iter = int(config.get("iv_max_iter", 1000))
-
-    selection_model = LogisticRegression(max_iter=max_iter)
-    selection_model.fit(design_matrix, source)
-    source_prob = selection_model.predict_proba(design_matrix)[:, 1]
-    source_prob = np.clip(source_prob, clip_min, clip_max)
-
-    obs_prob = source_prob[-obs_data.shape[0]:]
-    weights = obs_prob / (1.0 - obs_prob)
-    weights = _normalize_weights(weights)
-
-    corrected_score = np.log(obs_prob / (1.0 - obs_prob))
-    pseudo_outcome = None
+    # For RCT-target OBS-side loss, estimate odds on reversed source label so w=(1-pi)/pi
+    # becomes p(RCT|x)/p(OBS|x) on OBS samples.
+    df_all_for_obs_weight = df_all.copy()
+    df_all_for_obs_weight["_G_IV"] = 1.0 - df_all_for_obs_weight["G"]
+    all_weights = fit_iv_pipeline(
+        df_all_for_obs_weight,
+        Xc_cols=xc_cols,
+        Xz_cols=selected_iv_cols,
+        t_col="T",
+        y_col="Y",
+        g_col="_G_IV",
+        y_ref=float(config.get("iv_y_ref", 0.0)),
+        weight_clip_min=float(config.get("iv_clip_min", 0.05)),
+        weight_clip_max=float(config.get("iv_clip_max", 20.0)),
+        max_iter=int(config.get("iv_max_iter", 2000)),
+    )
+    weights = _normalize_weights(all_weights[-obs_data.shape[0] :])
 
     return ObsPluginOutput(
         method="iv",
         sample_weights=weights,
-        pseudo_outcome=pseudo_outcome,
-        corrected_score=corrected_score,
+        pseudo_outcome=None,
+        corrected_score=None,
         corrected_loss_component={"type": "weighted_obs_loss_iv"},
         metadata={
-            "selection_model": selection_model,
-            "selection_probabilities": obs_prob,
-            "selected_iv_indices": selected_indices,
-            "selected_iv_names": selection_summary["selected_names"],
-            "screening_summary": selection_summary["screening_summary"],
-            "selection_feature_names": feature_names,
-            "selection_formula": "pi(x, y, z) = P(G=1 | X, A, Y, Z, Y*Z)",
-            "relevance_alpha": selection_summary["relevance_alpha"],
-            "exclusion_alpha": selection_summary["exclusion_alpha"],
+            "selected_iv_names": selected_iv_cols,
+            "selected_iv_cols": selected_iv_cols,
+            "screening_logs": screening["screening_logs"],
+            "screening_summary": screening,
+            "Xc_cols": xc_cols,
+            "Xz_cols": selected_iv_cols,
+            "selection_formula": "w_iv=(1-pi)/pi with pi from eta+lambda logistic decomposition",
         },
     )
 

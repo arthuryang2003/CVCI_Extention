@@ -33,9 +33,10 @@ from obs import (
     ShadowPlugin,
     load_lalonde_obs_target_data,
 )
+from utils.lalonde_utils import get_lalonde_default_covariates, load_lalonde_csv
 
 
-DEFAULT_VARIABLES = ["re75"]
+DEFAULT_VARIABLES = None
 
 
 def parse_args():
@@ -119,7 +120,11 @@ def main():
     np.random.seed(args.seed)
 
     method_name = "selection_iv" if args.method == "iv" else args.method
-    x_cols = DEFAULT_VARIABLES if args.variables is None else list(args.variables)
+    if args.variables is None:
+        raw_df = load_lalonde_csv(args.lalonde_path)
+        x_cols = get_lalonde_default_covariates(raw_df)
+    else:
+        x_cols = list(args.variables)
     extra_feature_cols = []
     if args.iv_candidate_cols:
         extra_feature_cols.extend(list(args.iv_candidate_cols))

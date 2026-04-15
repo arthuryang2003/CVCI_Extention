@@ -12,7 +12,7 @@ import pandas as pd
 
 from methods import CWPlugin, IPSWPlugin, SelectionCorrectionPlugin, SelectionIVPlugin, ShadowPlugin
 from obs.estimator import ObsTargetBaseEstimator
-from utils.lalonde_utils import load_lalonde_split
+from utils.lalonde_utils import get_lalonde_default_covariates, load_lalonde_csv, load_lalonde_split
 
 
 def parse_args() -> argparse.Namespace:
@@ -21,7 +21,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--method", type=str, required=True, choices=["cvci", "rhc"])
     parser.add_argument("--plugin", type=str, default="none", choices=["none", "shadow", "iv", "ipsw", "cw"])
     parser.add_argument("--obs-source", type=str, default="cps", choices=["cps", "psid"])
-    parser.add_argument("--x-cols", nargs="*", default=["re75"])
+    parser.add_argument("--x-cols", nargs="*", default=None)
     parser.add_argument("--seed", type=int, default=2024)
     parser.add_argument("--truth-mode", type=str, default="proxy_ate", choices=["none", "proxy_ate", "synthetic_truth"])
     parser.add_argument("--truth-value", type=float, default=None)
@@ -219,7 +219,7 @@ def _run_cvci(
         "plugin_name": _normalize_plugin_name(args.plugin),
         "plugin_summary": plugin_summary,
         "selected_shadow_cols": metadata.get("selected_shadow_cols"),
-        "selected_iv_cols": metadata.get("selected_iv_names"),
+        "selected_iv_cols": metadata.get("selected_iv_cols", metadata.get("selected_iv_names")),
         "truth_type": truth_type,
         "truth_value": truth_value,
         "data_split_summary": data_split_summary,
@@ -291,6 +291,9 @@ def _save_outputs(result: Dict[str, object], output_json: Optional[str], output_
 def main() -> None:
     args = parse_args()
     np.random.seed(args.seed)
+    if args.x_cols is None:
+        raw_df = load_lalonde_csv(args.lalonde_path)
+        args.x_cols = get_lalonde_default_covariates(raw_df)
 
     if args.target_mode == "rct" and args.method != "cvci":
         raise ValueError("For target_mode='rct', method must be 'cvci'.")

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
-from utils.lalonde_utils import OBS_DEFAULT_X_COLS, load_lalonde_split
+from utils.lalonde_utils import OBS_DEFAULT_X_COLS, get_lalonde_default_covariates, load_lalonde_csv, load_lalonde_split
 
 
 DEFAULT_X_COLS = list(OBS_DEFAULT_X_COLS)
@@ -111,7 +111,8 @@ def load_lalonde_obs_target_data(
         ObsTargetDataBundle containing standardized `df_rct`, `df_obs`, `x_cols`, and metadata.
     """
     if x_cols is None:
-        x_cols = DEFAULT_X_COLS
+        raw_df = load_lalonde_csv(lalonde_path)
+        x_cols = get_lalonde_default_covariates(raw_df)
     x_cols = list(x_cols)
     extra_feature_cols = [] if extra_feature_cols is None else list(extra_feature_cols)
     all_feature_cols = list(dict.fromkeys(x_cols + extra_feature_cols))

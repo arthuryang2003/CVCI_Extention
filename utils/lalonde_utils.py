@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 
@@ -136,10 +136,19 @@ def ensure_required_columns(df: pd.DataFrame, required_cols: Sequence[str], cont
         raise ValueError(f"Missing required columns for {context}: {missing_cols}")
 
 
+def get_lalonde_default_covariates(df: pd.DataFrame) -> List[str]:
+    """
+    Lalonde baseline covariates: all columns except treatment/outcome/source labels.
+    """
+    excluded = {"treatment", "re78", "group", "T", "Y", "G"}
+    covariates = [col for col in df.columns if col not in excluded]
+    return [str(col) for col in covariates]
+
+
 def load_lalonde_split(
     target_mode: str,
     obs_source: str,
-    x_cols: Sequence[str],
+    x_cols: Optional[Sequence[str]] = None,
     lalonde_path: str = "lalonde.csv",
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, object]]:
     """
@@ -156,8 +165,10 @@ def load_lalonde_split(
         raise ValueError(f"target_mode must be one of ['rct', 'obs'], got: {target_mode}")
 
     obs_source = str(obs_source).lower()
-    x_cols = list(x_cols)
     raw_df = load_lalonde_csv(lalonde_path)
+    if x_cols is None:
+        x_cols = get_lalonde_default_covariates(raw_df)
+    x_cols = list(x_cols)
     ensure_required_columns(raw_df, x_cols + ["treatment", "re78", "group"], context="load_lalonde_split")
 
     df_rct_raw, df_obs_raw = split_obs_target_groups(raw_df, obs_source=obs_source)

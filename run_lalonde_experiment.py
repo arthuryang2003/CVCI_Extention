@@ -46,6 +46,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--shadow-residual-independence-threshold", type=float, default=0.02)
     parser.add_argument("--shadow-allow-fallback", action="store_true")
     parser.add_argument("--shadow-mc-samples", type=int, default=2000)
+    parser.add_argument(
+        "--shadow-direction",
+        type=str,
+        default="auto",
+        choices=["auto", "obs_to_rct", "rct_to_obs"],
+    )
+    parser.add_argument(
+        "--shadow-relevance-group",
+        type=str,
+        default="none",
+        choices=["none", "target", "source"],
+    )
 
     parser.add_argument("--output-json", type=str, default=None)
     parser.add_argument("--output-csv", type=str, default=None)
@@ -54,6 +66,25 @@ def parse_args() -> argparse.Namespace:
 
 def _normalize_plugin_name(plugin: str) -> str:
     return "iv" if plugin == "selection_iv" else plugin
+
+
+def _normalize_shadow_relevance_group(arg_value: str) -> Optional[str]:
+    value = str(arg_value).lower()
+    if value == "none":
+        return None
+    return value
+
+
+def _resolve_shadow_direction(arg_direction: str, target_mode: str) -> str:
+    direction = str(arg_direction).lower()
+    mode = str(target_mode).lower()
+    if direction != "auto":
+        return direction
+    if mode == "rct":
+        return "obs_to_rct"
+    if mode == "obs":
+        return "rct_to_obs"
+    raise ValueError(f"Unsupported target_mode for shadow direction auto resolution: {target_mode}")
 
 
 def _weight_summary(weights: np.ndarray) -> Dict[str, float]:
@@ -105,7 +136,12 @@ def _truth_and_rmse(
     raise ValueError(f"Unsupported truth_mode: {truth_mode}")
 
 
-def _build_rhc_plugin(args: argparse.Namespace, x_cols: Sequence[str]) -> SelectionCorrectionPlugin:
+def _build_rhc_plugin(
+    args: argparse.Namespace,
+    x_cols: Sequence[str],
+    shadow_direction: str,
+    shadow_relevance_group: Optional[str],
+) -> SelectionCorrectionPlugin:
     if args.plugin == "none":
         return SelectionCorrectionPlugin(name="none")
     if args.plugin == "ipsw":
@@ -122,11 +158,17 @@ def _build_rhc_plugin(args: argparse.Namespace, x_cols: Sequence[str]) -> Select
             verbose=False,
         )
     if args.plugin == "shadow":
+        if shadow_direction != "rct_to_obs":
+            raise ValueError(
+                "OBS-target RHC shadow plugin uses rct_to_obs direction. "
+                f"Received shadow_direction={shadow_direction}."
+            )
         return ShadowPlugin(
             association_threshold=args.shadow_association_threshold,
             residual_independence_threshold=args.shadow_residual_independence_threshold,
             shadow_mc_samples=args.shadow_mc_samples,
             allow_empty_fallback=args.shadow_allow_fallback,
+            shadow_relevance_group=shadow_relevance_group,
             random_state=args.seed,
             verbose=False,
         )
@@ -159,6 +201,9 @@ def _run_cvci(
         axis=1,
     )
 
+    resolved_shadow_direction = _resolve_shadow_direction(args.shadow_direction, target_mode="rct")
+    shadow_relevance_group = _normalize_shadow_relevance_group(args.shadow_relevance_group)
+
     config = {
         "mode": "linear",
         "lambda_bin": int(args.lambda_bin),
@@ -173,6 +218,8 @@ def _run_cvci(
         "shadow_residual_independence_threshold": float(args.shadow_residual_independence_threshold),
         "shadow_allow_fallback": bool(args.shadow_allow_fallback),
         "shadow_mc_samples": int(args.shadow_mc_samples),
+        "shadow_direction": resolved_shadow_direction,
+        "shadow_relevance_group": shadow_relevance_group,
         "iv_relevance_alpha": float(args.iv_relevance_threshold),
         "iv_exclusion_alpha": float(args.iv_exclusion_threshold),
         "ipsw_clip_min": float(args.ipsw_clip_min),
@@ -220,6 +267,8 @@ def _run_cvci(
         "plugin_summary": plugin_summary,
         "selected_shadow_cols": metadata.get("selected_shadow_cols"),
         "selected_iv_cols": metadata.get("selected_iv_cols", metadata.get("selected_iv_names")),
+        "shadow_direction": resolved_shadow_direction,
+        "shadow_relevance_group": shadow_relevance_group,
         "truth_type": truth_type,
         "truth_value": truth_value,
         "data_split_summary": data_split_summary,
@@ -233,7 +282,14 @@ def _run_rhc(
     data_split_summary: Dict[str, object],
 ) -> Dict[str, object]:
     x_cols = list(args.x_cols)
-    plugin = _build_rhc_plugin(args, x_cols=x_cols)
+    resolved_shadow_direction = _resolve_shadow_direction(args.shadow_direction, target_mode="obs")
+    shadow_relevance_group = _normalize_shadow_relevance_group(args.shadow_relevance_group)
+    plugin = _build_rhc_plugin(
+        args,
+        x_cols=x_cols,
+        shadow_direction=resolved_shadow_direction,
+        shadow_relevance_group=shadow_relevance_group,
+    )
 
     estimator = ObsTargetBaseEstimator(plugin=plugin, model_type="linear", random_state=args.seed)
     estimator.fit(df_rct=df_rct, df_obs=df_obs, x_cols=x_cols, a_col="T", y_col="Y", g_col="G")
@@ -264,6 +320,8 @@ def _run_rhc(
         "plugin_summary": plugin_summary,
         "selected_shadow_cols": plugin_summary.get("selected_shadow_cols"),
         "selected_iv_cols": plugin_summary.get("selected_iv_cols"),
+        "shadow_direction": resolved_shadow_direction,
+        "shadow_relevance_group": shadow_relevance_group,
         "truth_type": truth_type,
         "truth_value": truth_value,
         "data_split_summary": data_split_summary,

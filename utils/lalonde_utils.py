@@ -195,6 +195,7 @@ def load_lalonde_split(
         "target_mode": target_mode,
         "obs_source": obs_source,
         "lalonde_path": lalonde_path,
+        "g_semantics": {"1": "RCT", "0": "OBS"},
         "n_rct": int(df_rct.shape[0]),
         "n_obs": int(df_obs.shape[0]),
         "n_rct_treated": int(df_rct["T"].sum()),

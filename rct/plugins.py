@@ -642,8 +642,16 @@ def _build_shadow_plugin(obs_data: np.ndarray, exp_data: np.ndarray, config: Dic
     relevance_threshold = float(config.get("shadow_association_threshold", 0.02))
     independence_threshold = float(config.get("shadow_residual_independence_threshold", 0.02))
     allow_empty_fallback = bool(config.get("shadow_allow_fallback", False))
+    relevance_group = config.get("shadow_relevance_group", None)
     mc_samples = int(config.get("shadow_mc_samples", 2000))
     random_state = int(config.get("random_state", 2024))
+    shadow_direction = str(config.get("shadow_direction", "obs_to_rct")).lower()
+    source_g = 0
+    target_g = 1
+    if shadow_direction != "obs_to_rct":
+        raise ValueError(
+            f"RCT-target shadow plugin requires shadow_direction='obs_to_rct', got {shadow_direction}."
+        )
 
     df_exp = pd.DataFrame(exp_data[:, :d_exp], columns=covariate_names)
     df_exp["T"] = exp_data[:, d_exp].astype(float)
@@ -665,6 +673,10 @@ def _build_shadow_plugin(obs_data: np.ndarray, exp_data: np.ndarray, config: Dic
         relevance_threshold=relevance_threshold,
         independence_threshold=independence_threshold,
         allow_empty_fallback=allow_empty_fallback,
+        relevance_group=relevance_group,
+        shadow_direction=shadow_direction,
+        source_g=source_g,
+        target_g=target_g,
     )
     selected_shadow_cols = list(screening["selected_shadow_cols"])
     xc_cols = list(screening["Xc_cols"])
@@ -675,7 +687,11 @@ def _build_shadow_plugin(obs_data: np.ndarray, exp_data: np.ndarray, config: Dic
         t_col="T",
         y_col="Y",
         g_col="G",
+        shadow_direction=shadow_direction,
+        source_g=source_g,
+        target_g=target_g,
     )
+    # RCT-target CVCI requires OBS outcomes aligned to RCT target distribution.
     pseudo_outcome = build_shadow_obs_outcomes_for_cvci(
         df_obs=df_obs,
         shadow_models=shadow_models,
@@ -684,6 +700,9 @@ def _build_shadow_plugin(obs_data: np.ndarray, exp_data: np.ndarray, config: Dic
         t_col="T",
         M=mc_samples,
         random_state=random_state,
+        shadow_direction=shadow_direction,
+        source_g=source_g,
+        target_g=target_g,
     )
 
     return ObsPluginOutput(
@@ -701,6 +720,10 @@ def _build_shadow_plugin(obs_data: np.ndarray, exp_data: np.ndarray, config: Dic
             "pseudo_outcome_mean": float(np.mean(pseudo_outcome)),
             "pseudo_outcome_std": float(np.std(pseudo_outcome)),
             "shadow_mc_samples": mc_samples,
-            "description": "Shadow correction replaces observational outcomes used by L_obs.",
+            "shadow_direction": shadow_direction,
+            "source_g": source_g,
+            "target_g": target_g,
+            "pseudo_outcome_type": "obs_to_rct_shadow_outcome",
+            "description": "Shadow correction replaces observational outcomes used by obs_outcomes in L_obs substitution.",
         },
     )

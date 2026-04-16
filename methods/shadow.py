@@ -1,8 +1,9 @@
 """Formal shadow-recovery core for source-selection correction.
 
 Mathematical mapping:
-- ``model_f_t1 / model_f_t0``: baseline outcome distributions ``p(y|G=1, Xc, Xz, T=t)``.
-- ``model_g_y``: source model ``P(G=1|Xc, T, Y)`` used in shadow recovery weights.
+- ``model_f_t1 / model_f_t0``: baseline outcome distributions
+  ``p(y|G=source_g, Xc, Xz, T=t)``.
+- ``model_g_y``: source-membership model ``P(G=source_g|Xc, T, Y)``.
 - ``mu_t^shadow``: Monte Carlo normalized weighted expectation under shadow recovery.
 - ``tau_shadow = mu1_shadow - mu0_shadow``.
 """
@@ -19,6 +20,75 @@ from sklearn.linear_model import LinearRegression, LogisticRegression
 from utils.screening_utils import partial_abs_corr
 
 ArrayLike = Union[np.ndarray, pd.Series, Sequence[float]]
+GroupLike = Optional[Union[float, int]]
+
+
+def _canonical_group_value(value: Union[float, int]) -> Union[int, float]:
+    val = float(value)
+    if np.isclose(val, round(val)):
+        return int(round(val))
+    return val
+
+
+def _infer_shadow_direction_label(source_g: Union[float, int], target_g: Union[float, int]) -> str:
+    src = _canonical_group_value(source_g)
+    tgt = _canonical_group_value(target_g)
+    if src == 0 and tgt == 1:
+        return "obs_to_rct"
+    if src == 1 and tgt == 0:
+        return "rct_to_obs"
+    return f"custom_{src}_to_{tgt}"
+
+
+def _resolve_shadow_direction(
+    shadow_direction: Optional[str] = None,
+    source_g: GroupLike = None,
+    target_g: GroupLike = None,
+    *,
+    default_source_g: Union[float, int] = 1,
+    default_target_g: Union[float, int] = 0,
+) -> Tuple[Union[float, int], Union[float, int], str]:
+    """Resolve source/target groups and canonical direction label.
+
+    source_g: group where baseline density p(y|G=source_g, Xc, Xz, T=t) is fitted.
+    target_g: group recovered by ratio weighting r(y)=(1-s)/s with s=P(G=source_g|Xc,T,Y).
+    """
+    direction_map = {
+        "obs_to_rct": (0, 1),
+        "rct_to_obs": (1, 0),
+    }
+    if shadow_direction is not None:
+        shadow_direction = str(shadow_direction).lower()
+        if shadow_direction not in direction_map:
+            raise ValueError(f"Unsupported shadow_direction={shadow_direction}.")
+        mapped_source, mapped_target = direction_map[shadow_direction]
+    else:
+        mapped_source, mapped_target = None, None
+
+    resolved_source = mapped_source if source_g is None else source_g
+    resolved_target = mapped_target if target_g is None else target_g
+    if resolved_source is None and resolved_target is None:
+        resolved_source, resolved_target = default_source_g, default_target_g
+    elif resolved_source is None or resolved_target is None:
+        raise ValueError("source_g and target_g must be provided together when shadow_direction is not given.")
+
+    resolved_source = _canonical_group_value(resolved_source)
+    resolved_target = _canonical_group_value(resolved_target)
+    if resolved_source == resolved_target:
+        raise ValueError(f"source_g and target_g must be different, got {resolved_source}.")
+    if mapped_source is not None and (
+        _canonical_group_value(mapped_source) != resolved_source
+        or _canonical_group_value(mapped_target) != resolved_target
+    ):
+        raise ValueError(
+            "shadow_direction conflicts with explicit source_g/target_g: "
+            f"direction={shadow_direction}, source_g={resolved_source}, target_g={resolved_target}."
+        )
+
+    resolved_direction = (
+        shadow_direction if shadow_direction is not None else _infer_shadow_direction_label(resolved_source, resolved_target)
+    )
+    return resolved_source, resolved_target, resolved_direction
 
 
 def _to_1d_float(values: ArrayLike) -> np.ndarray:
@@ -131,6 +201,10 @@ def screen_shadow_candidates(
     relevance_threshold: float = 0.02,
     independence_threshold: float = 0.02,
     allow_empty_fallback: bool = False,
+    relevance_group: Optional[str] = None,
+    shadow_direction: Optional[str] = None,
+    source_g: GroupLike = None,
+    target_g: GroupLike = None,
 ) -> Dict[str, object]:
     """
     Heuristic shadow-variable screening over all candidate covariates.
@@ -146,6 +220,30 @@ def screen_shadow_candidates(
     if not x_cols:
         raise ValueError("X_cols must be non-empty.")
 
+    resolved_source_g, resolved_target_g, resolved_direction = _resolve_shadow_direction(
+        shadow_direction=shadow_direction,
+        source_g=source_g,
+        target_g=target_g,
+    )
+
+    relevance_group_normalized = None if relevance_group is None else str(relevance_group).lower()
+    if relevance_group_normalized not in {None, "target", "source"}:
+        raise ValueError("relevance_group must be one of {None, 'target', 'source'}.")
+
+    if relevance_group_normalized is None:
+        df_rel = df
+    elif relevance_group_normalized == "target":
+        df_rel = df[df[g_col] == resolved_target_g]
+    else:
+        df_rel = df[df[g_col] == resolved_source_g]
+    if df_rel.empty:
+        raise ValueError(
+            f"Shadow relevance subset is empty for relevance_group={relevance_group_normalized}, "
+            f"source_g={resolved_source_g}, target_g={resolved_target_g}."
+        )
+
+    t_vec_rel = _to_1d_float(df_rel[t_col])
+    y_vec_rel = _to_1d_float(df_rel[y_col])
     t_vec = _to_1d_float(df[t_col])
     y_vec = _to_1d_float(df[y_col])
     g_vec = _to_1d_float(df[g_col])
@@ -155,16 +253,18 @@ def screen_shadow_candidates(
 
     for col in x_cols:
         remaining = [x for x in x_cols if x != col]
+        z_vec_rel = _to_1d_float(df_rel[col])
         z_vec = _to_1d_float(df[col])
 
-        nuisance_rel_parts = [t_vec.reshape(-1, 1)]
+        nuisance_rel_parts = [t_vec_rel.reshape(-1, 1)]
         nuisance_ind_parts = [y_vec.reshape(-1, 1), t_vec.reshape(-1, 1)]
         if remaining:
+            remain_mat_rel = df_rel[remaining].to_numpy(dtype=float)
             remain_mat = df[remaining].to_numpy(dtype=float)
-            nuisance_rel_parts.append(remain_mat)
+            nuisance_rel_parts.append(remain_mat_rel)
             nuisance_ind_parts.append(remain_mat)
 
-        rel = float(partial_abs_corr(z_vec, y_vec, np.hstack(nuisance_rel_parts)))
+        rel = float(partial_abs_corr(z_vec_rel, y_vec_rel, np.hstack(nuisance_rel_parts)))
         ind = float(partial_abs_corr(z_vec, g_vec, np.hstack(nuisance_ind_parts)))
         passed = bool(rel >= relevance_threshold and ind <= independence_threshold)
         if passed:
@@ -199,6 +299,10 @@ def screen_shadow_candidates(
         "relevance_threshold": float(relevance_threshold),
         "independence_threshold": float(independence_threshold),
         "allow_empty_fallback": bool(allow_empty_fallback),
+        "relevance_group": relevance_group_normalized,
+        "source_g": resolved_source_g,
+        "target_g": resolved_target_g,
+        "shadow_direction": resolved_direction,
     }
 
 
@@ -237,6 +341,9 @@ def fit_shadow_pipeline(
     *,
     X_cols: Optional[Sequence[str]] = None,
     selected_shadow_cols: Optional[Sequence[str]] = None,
+    shadow_direction: Optional[str] = None,
+    source_g: GroupLike = None,
+    target_g: GroupLike = None,
 ) -> Dict[str, object]:
     """
     Fit all models needed for shadow-based recovery.
@@ -256,28 +363,38 @@ def fit_shadow_pipeline(
     if missing:
         raise ValueError(f"Missing required columns for fit_shadow_pipeline: {missing}")
 
-    df_rct = df[df[g_col] == 1].copy()
-    if df_rct.empty:
-        raise ValueError("No RCT rows (G==1) available for shadow pipeline.")
+    resolved_source_g, resolved_target_g, resolved_direction = _resolve_shadow_direction(
+        shadow_direction=shadow_direction,
+        source_g=source_g,
+        target_g=target_g,
+    )
 
-    df_rct_t1 = df_rct[df_rct[t_col] == 1].copy()
-    df_rct_t0 = df_rct[df_rct[t_col] == 0].copy()
-    if df_rct_t1.empty or df_rct_t0.empty:
-        raise ValueError("RCT rows must contain both treatment arms (T=1 and T=0).")
+    df_source = df[df[g_col] == resolved_source_g].copy()
+    if df_source.empty:
+        raise ValueError(f"No source rows (G=={resolved_source_g}) available for shadow pipeline.")
+
+    df_source_t1 = df_source[df_source[t_col] == 1].copy()
+    df_source_t0 = df_source[df_source[t_col] == 0].copy()
+    if df_source_t1.empty or df_source_t0.empty:
+        raise ValueError(
+            f"Source rows (G=={resolved_source_g}) must contain both treatment arms (T=1 and T=0)."
+        )
 
     dist_cols = list(dict.fromkeys(xc_cols + xz_cols))
     model_f_t1 = fit_conditional_distribution_model(
-        X=df_rct_t1[dist_cols], y=df_rct_t1[y_col], feature_cols=dist_cols
+        X=df_source_t1[dist_cols], y=df_source_t1[y_col], feature_cols=dist_cols
     )
     model_f_t0 = fit_conditional_distribution_model(
-        X=df_rct_t0[dist_cols], y=df_rct_t0[y_col], feature_cols=dist_cols
+        X=df_source_t0[dist_cols], y=df_source_t0[y_col], feature_cols=dist_cols
     )
 
     gy_cols = list(dict.fromkeys(xc_cols + [t_col, y_col]))
-    model_g_y = fit_classifier(df[gy_cols], df[g_col])
+    # Keep classifier semantics explicit: class-1 always means "belongs to source_g".
+    source_membership = (df[g_col].to_numpy(dtype=float) == float(resolved_source_g)).astype(float)
+    model_g_y = fit_classifier(df[gy_cols], source_membership)
 
     gxz_cols = list(dict.fromkeys(xc_cols + [t_col] + xz_cols))
-    model_g_xz = fit_classifier(df[gxz_cols], df[g_col])
+    model_g_xz = fit_classifier(df[gxz_cols], source_membership)
 
     return {
         "model_f_t1": model_f_t1,
@@ -294,6 +411,9 @@ def fit_shadow_pipeline(
         "t_col": t_col,
         "y_col": y_col,
         "g_col": g_col,
+        "source_g": resolved_source_g,
+        "target_g": resolved_target_g,
+        "shadow_direction": resolved_direction,
     }
 
 
@@ -305,12 +425,17 @@ def predict_mu_t_shadow(
     M: int = 2000,
     random_state: Optional[int] = None,
     rng: Optional[np.random.Generator] = None,
+    shadow_direction: Optional[str] = None,
+    source_g: GroupLike = None,
+    target_g: GroupLike = None,
 ) -> float:
     """
     Predict ``mu_t^shadow(xc, xz)`` for continuous ``Y`` via Monte Carlo.
 
     Recovery weight for each sampled ``y``:
-    ``r_y = (1-s)/s``, where ``s = P(G=1|Xc, T=t, Y=y)``.
+    ``r_y = (1-s)/s``, where ``s = P(G=source_g|Xc, T=t, Y=y)``.
+
+    The ratio form is direction-invariant. Only source/target group assignment changes.
     """
     if int(t) not in (0, 1):
         raise ValueError(f"t must be 0 or 1, got {t}")
@@ -322,6 +447,14 @@ def predict_mu_t_shadow(
 
     model_f = models["model_f_t1"] if int(t) == 1 else models["model_f_t0"]
     model_g_y = models["model_g_y"]
+    resolved_source_g, resolved_target_g, resolved_direction = _resolve_shadow_direction(
+        shadow_direction=shadow_direction,
+        source_g=source_g,
+        target_g=target_g,
+        default_source_g=models.get("source_g", 1),
+        default_target_g=models.get("target_g", 0),
+    )
+    _ = resolved_source_g, resolved_target_g, resolved_direction
 
     xc = _to_1d_float(xc_vec)
     xz = _to_1d_float(xz_vec)
@@ -336,6 +469,7 @@ def predict_mu_t_shadow(
     )
     s = _to_1d_float(predict_prob(model_g_y, gy_rows))
     s = _to_1d_float(clip_prob(s))
+    # Direction-invariant ratio: s is source-membership prob, so (1-s)/s is target/source.
     r_y = (1.0 - s) / s
 
     denom = float(np.sum(r_y))
@@ -356,13 +490,36 @@ def predict_tau_shadow(
     M: int = 2000,
     random_state: Optional[int] = None,
     rng: Optional[np.random.Generator] = None,
+    shadow_direction: Optional[str] = None,
+    source_g: GroupLike = None,
+    target_g: GroupLike = None,
 ) -> Dict[str, float]:
     """Compute ``tau_shadow = mu1_shadow - mu0_shadow`` for one sample."""
     if rng is None:
         rng = np.random.default_rng(random_state)
 
-    mu1 = predict_mu_t_shadow(models, xc_vec=xc_vec, xz_vec=xz_vec, t=1, M=M, rng=rng)
-    mu0 = predict_mu_t_shadow(models, xc_vec=xc_vec, xz_vec=xz_vec, t=0, M=M, rng=rng)
+    mu1 = predict_mu_t_shadow(
+        models,
+        xc_vec=xc_vec,
+        xz_vec=xz_vec,
+        t=1,
+        M=M,
+        rng=rng,
+        shadow_direction=shadow_direction,
+        source_g=source_g,
+        target_g=target_g,
+    )
+    mu0 = predict_mu_t_shadow(
+        models,
+        xc_vec=xc_vec,
+        xz_vec=xz_vec,
+        t=0,
+        M=M,
+        rng=rng,
+        shadow_direction=shadow_direction,
+        source_g=source_g,
+        target_g=target_g,
+    )
     tau = float(mu1 - mu0)
     return {"mu1_shadow": float(mu1), "mu0_shadow": float(mu0), "tau_shadow": tau}
 
@@ -378,14 +535,30 @@ def build_shadow_obs_outcomes_for_cvci(
     *,
     X_cols: Optional[Sequence[str]] = None,
     selected_shadow_cols: Optional[Sequence[str]] = None,
+    shadow_direction: Optional[str] = None,
+    source_g: GroupLike = None,
+    target_g: GroupLike = None,
 ) -> np.ndarray:
-    """Build shadow-corrected observational outcomes for CVCI ``L_obs`` substitution."""
+    """Build shadow-corrected outcomes for CVCI ``obs_outcomes`` substitution.
+
+    In RCT-target mode this should be configured as obs->rct (source=OBS, target=RCT),
+    so pseudo outcomes align OBS samples to the RCT target distribution.
+    """
     xc_cols, xz_cols = _resolve_xc_xz(
         Xc_cols=Xc_cols,
         Xz_cols=Xz_cols,
         X_cols=X_cols,
         selected_shadow_cols=selected_shadow_cols,
     )
+
+    resolved_source_g, resolved_target_g, resolved_direction = _resolve_shadow_direction(
+        shadow_direction=shadow_direction,
+        source_g=source_g,
+        target_g=target_g,
+        default_source_g=shadow_models.get("source_g", 1),
+        default_target_g=shadow_models.get("target_g", 0),
+    )
+    _ = resolved_source_g, resolved_target_g, resolved_direction
 
     if t_col not in df_obs.columns:
         raise ValueError(f"Missing treatment column in df_obs: {t_col}")
@@ -400,6 +573,9 @@ def build_shadow_obs_outcomes_for_cvci(
             t=int(row[t_col]),
             M=M,
             rng=rng,
+            shadow_direction=resolved_direction,
+            source_g=resolved_source_g,
+            target_g=resolved_target_g,
         )
     return out
 
@@ -416,6 +592,9 @@ def build_shadow_corrected_targets_for_rhc(
     *,
     X_cols: Optional[Sequence[str]] = None,
     selected_shadow_cols: Optional[Sequence[str]] = None,
+    shadow_direction: Optional[str] = None,
+    source_g: GroupLike = None,
+    target_g: GroupLike = None,
 ) -> Dict[str, object]:
     """Build RHC second-stage corrected target: ``corrected_target = tau_shadow - w_hat``."""
     xc_cols, xz_cols = _resolve_xc_xz(
@@ -423,6 +602,14 @@ def build_shadow_corrected_targets_for_rhc(
         Xz_cols=Xz_cols,
         X_cols=X_cols,
         selected_shadow_cols=selected_shadow_cols,
+    )
+
+    resolved_source_g, resolved_target_g, resolved_direction = _resolve_shadow_direction(
+        shadow_direction=shadow_direction,
+        source_g=source_g,
+        target_g=target_g,
+        default_source_g=shadow_models.get("source_g", 1),
+        default_target_g=shadow_models.get("target_g", 0),
     )
 
     w_hat = _to_1d_float(w_hat_rct)
@@ -441,6 +628,9 @@ def build_shadow_corrected_targets_for_rhc(
             xz_vec=row[xz_cols].to_numpy(dtype=float) if xz_cols else np.asarray([], dtype=float),
             M=M,
             rng=rng,
+            shadow_direction=resolved_direction,
+            source_g=resolved_source_g,
+            target_g=resolved_target_g,
         )
         mu1_list.append(float(tau_obj["mu1_shadow"]))
         mu0_list.append(float(tau_obj["mu0_shadow"]))
@@ -462,5 +652,8 @@ def build_shadow_corrected_targets_for_rhc(
             "std_tau_shadow": float(np.std(tau_shadow)),
             "mean_corrected_target": float(np.mean(corrected_target)),
             "std_corrected_target": float(np.std(corrected_target)),
+            "shadow_direction": resolved_direction,
+            "source_g": resolved_source_g,
+            "target_g": resolved_target_g,
         },
     }

@@ -32,6 +32,7 @@ class ShadowPlugin(SelectionCorrectionPlugin):
     verbose: bool = True
     shadow_mc_samples: int = 2000
     allow_empty_fallback: bool = False
+    shadow_relevance_group: Optional[str] = None
     random_state: int = 2024
 
     def _log(self, message: str):
@@ -62,6 +63,10 @@ class ShadowPlugin(SelectionCorrectionPlugin):
             relevance_threshold=float(self.association_threshold),
             independence_threshold=float(self.residual_independence_threshold),
             allow_empty_fallback=bool(self.allow_empty_fallback),
+            relevance_group=self.shadow_relevance_group,
+            shadow_direction="rct_to_obs",
+            source_g=1,
+            target_g=0,
         )
         selected_shadow_cols = list(screening["selected_shadow_cols"])
         xc_cols = list(screening["Xc_cols"])
@@ -74,6 +79,9 @@ class ShadowPlugin(SelectionCorrectionPlugin):
             t_col=a_col,
             y_col=y_col,
             g_col=g_col,
+            shadow_direction="rct_to_obs",
+            source_g=1,
+            target_g=0,
         )
 
         self.shadow_models_ = shadow_models
@@ -95,6 +103,10 @@ class ShadowPlugin(SelectionCorrectionPlugin):
             "screening": screening,
             "shadow_mc_samples": int(self.shadow_mc_samples),
             "allow_empty_fallback": bool(self.allow_empty_fallback),
+            "shadow_direction": "rct_to_obs",
+            "source_g": 1,
+            "target_g": 0,
+            "shadow_relevance_group": self.shadow_relevance_group,
         }
         self._log(f"Selected shadow cols: {self.selected_shadow_cols_}")
         return self
@@ -122,6 +134,9 @@ class ShadowPlugin(SelectionCorrectionPlugin):
             t_col=self.a_col_,
             M=int(self.shadow_mc_samples),
             random_state=int(self.random_state),
+            shadow_direction="rct_to_obs",
+            source_g=1,
+            target_g=0,
         )
         self.diagnostics_["shadow_target_diagnostics"] = {
             "mean_tau_shadow": corrected["diagnostics"]["mean_tau_shadow"],

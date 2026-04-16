@@ -58,6 +58,10 @@ class RunResult:
     runtime_sec: float
     error: Optional[str]
     raw_payload: Optional[dict]
+    truth_value: Optional[float]
+    rmse: Optional[float]
+    selected_iv_cols: Optional[List[str]]
+    selected_shadow_cols: Optional[List[str]]
 
 
 def parse_args() -> argparse.Namespace:
@@ -72,7 +76,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--datasets", nargs="*", default=None, help="Dataset groups. obs default: cps psid; rct default: cps psid")
     parser.add_argument("--seeds", nargs="*", type=int, default=[2024, 2025, 2026])
     parser.add_argument("--lalonde-path", type=str, default="lalonde.csv")
-    parser.add_argument("--variables", nargs="*", default=["re75"])
+    parser.add_argument("--variables", nargs="*", default=None)
     parser.add_argument("--timeout-sec", type=int, default=1200)
     parser.add_argument("--output-csv", type=str, default="experiments/benchmark_summary.csv")
     parser.add_argument("--output-json", type=str, default="experiments/benchmark_raw_runs.json")
@@ -173,8 +177,27 @@ def run_one(target: str, dataset: str, method_label: str, seed: int, args: argpa
         payload = extract_first_json(completed.stdout)
         if target == "obs":
             estimate = float(payload["results"]["obs_target_ate_estimate"])
+            truth_value = None
+            rmse = None
         else:
             estimate = float(payload["plugin_estimate"])
+            gt = payload.get("ground_truth") or {}
+            # Prefer response-function based RCT ground truth when available.
+            if gt.get("response_func_estimate") is not None:
+                truth_value = float(gt["response_func_estimate"])
+            elif gt.get("mean_diff_estimate") is not None:
+                truth_value = float(gt["mean_diff_estimate"])
+            else:
+                truth_value = None
+            rmse = float(abs(estimate - truth_value)) if truth_value is not None else None
+
+        plugin_meta = payload.get("plugin_metadata") or {}
+        selected_iv_cols = plugin_meta.get("selected_iv_names") or plugin_meta.get("selected_iv_cols")
+        selected_shadow_cols = plugin_meta.get("selected_shadow_cols")
+        if selected_iv_cols is not None:
+            selected_iv_cols = [str(x) for x in selected_iv_cols]
+        if selected_shadow_cols is not None:
+            selected_shadow_cols = [str(x) for x in selected_shadow_cols]
         return RunResult(
             target=target,
             dataset=dataset,
@@ -185,6 +208,10 @@ def run_one(target: str, dataset: str, method_label: str, seed: int, args: argpa
             runtime_sec=runtime,
             error=None,
             raw_payload=payload,
+            truth_value=truth_value,
+            rmse=rmse,
+            selected_iv_cols=selected_iv_cols,
+            selected_shadow_cols=selected_shadow_cols,
         )
     except Exception as exc:  # noqa: BLE001
         runtime = time.perf_counter() - start
@@ -198,6 +225,10 @@ def run_one(target: str, dataset: str, method_label: str, seed: int, args: argpa
             runtime_sec=runtime,
             error=str(exc),
             raw_payload=None,
+            truth_value=None,
+            rmse=None,
+            selected_iv_cols=None,
+            selected_shadow_cols=None,
         )
 
 
@@ -209,27 +240,31 @@ def aggregate_results(results: Sequence[RunResult]) -> List[dict]:
     rows: List[dict] = []
     for (target, dataset, method_label), group in sorted(grouped.items()):
         estimates = [x.estimate for x in group if x.success and x.estimate is not None]
-        runtimes = [x.runtime_sec for x in group if x.success]
-        failed = [x.seed for x in group if not x.success]
-
+        rmses = [x.rmse for x in group if x.success and x.rmse is not None]
         est_mean = float(statistics.mean(estimates)) if estimates else math.nan
-        est_std = float(statistics.pstdev(estimates)) if len(estimates) > 1 else (0.0 if len(estimates) == 1 else math.nan)
-        rt_mean = float(statistics.mean(runtimes)) if runtimes else math.nan
-        rt_std = float(statistics.pstdev(runtimes)) if len(runtimes) > 1 else (0.0 if len(runtimes) == 1 else math.nan)
+        rmse_mean = float(statistics.mean(rmses)) if rmses else math.nan
+
+        iv_union: List[str] = []
+        shadow_union: List[str] = []
+        for run in group:
+            if run.selected_iv_cols:
+                for name in run.selected_iv_cols:
+                    if name not in iv_union:
+                        iv_union.append(name)
+            if run.selected_shadow_cols:
+                for name in run.selected_shadow_cols:
+                    if name not in shadow_union:
+                        shadow_union.append(name)
 
         rows.append(
             {
                 "target": target,
                 "dataset": dataset,
                 "method": method_label,
-                "n_runs": len(group),
-                "n_success": len(estimates),
-                "estimate_mean": est_mean,
-                "estimate_std": est_std,
-                "runtime_mean_sec": rt_mean,
-                "runtime_std_sec": rt_std,
-                "failed_seeds": ",".join(str(x) for x in failed),
-                "status": "ok" if len(estimates) == len(group) else "partial_or_failed",
+                "ate_mean": est_mean,
+                "rmse": rmse_mean,
+                "selected_iv_cols": "|".join(iv_union),
+                "selected_shadow_cols": "|".join(shadow_union),
             }
         )
     return rows
@@ -240,11 +275,10 @@ def print_table(rows: Sequence[dict]) -> None:
         "target",
         "dataset",
         "method",
-        "n_success/n_runs",
-        "estimate_mean",
-        "estimate_std",
-        "runtime_mean_sec",
-        "status",
+        "ate_mean",
+        "rmse",
+        "selected_iv_cols",
+        "selected_shadow_cols",
     ]
     print("\t".join(headers))
     for r in rows:
@@ -254,11 +288,10 @@ def print_table(rows: Sequence[dict]) -> None:
                     str(r["target"]),
                     str(r["dataset"]),
                     str(r["method"]),
-                    f"{r['n_success']}/{r['n_runs']}",
-                    f"{r['estimate_mean']:.6f}" if not math.isnan(r["estimate_mean"]) else "nan",
-                    f"{r['estimate_std']:.6f}" if not math.isnan(r["estimate_std"]) else "nan",
-                    f"{r['runtime_mean_sec']:.3f}" if not math.isnan(r["runtime_mean_sec"]) else "nan",
-                    str(r["status"]),
+                    f"{r['ate_mean']:.6f}" if not math.isnan(r["ate_mean"]) else "nan",
+                    f"{r['rmse']:.6f}" if not math.isnan(r["rmse"]) else "nan",
+                    str(r["selected_iv_cols"]),
+                    str(r["selected_shadow_cols"]),
                 ]
             )
         )
@@ -271,14 +304,10 @@ def save_csv(rows: Sequence[dict], path: str) -> None:
         "target",
         "dataset",
         "method",
-        "n_runs",
-        "n_success",
-        "estimate_mean",
-        "estimate_std",
-        "runtime_mean_sec",
-        "runtime_std_sec",
-        "failed_seeds",
-        "status",
+        "ate_mean",
+        "rmse",
+        "selected_iv_cols",
+        "selected_shadow_cols",
     ]
     with output_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -298,6 +327,10 @@ def save_raw(results: Sequence[RunResult], path: str) -> None:
             "success": r.success,
             "estimate": r.estimate,
             "runtime_sec": r.runtime_sec,
+            "truth_value": r.truth_value,
+            "rmse": r.rmse,
+            "selected_iv_cols": r.selected_iv_cols,
+            "selected_shadow_cols": r.selected_shadow_cols,
             "error": r.error,
             "raw_payload": r.raw_payload,
         }

@@ -141,5 +141,61 @@ Results are saved as JSON files (for data) and TXT files (for tables or texts).
 
 Choise 2: For scripts with full configurations, use a bash script and specify ``--cpus-per-task`` for parallel computing. For single configuration, use arguments specified in the script.
 
+## Quick Commands: LaLonde NSW+CPS (RCT Target)
+The unified entrypoint for this repository is:
+```bash
+python run_lalonde_experiment.py --target-mode rct --method cvci --obs-source cps --plugin <none|ipsw|cw|iv|shadow>
+```
+
+If you run in a conda environment named `CVCI`:
+```bash
+conda run -n CVCI python run_lalonde_experiment.py --target-mode rct --method cvci --obs-source cps --plugin <none|ipsw|cw|iv|shadow>
+```
+
+### Run all five methods once (base, base+ipsw, base+cw, base+iv, base+shadow)
+```bash
+for p in none ipsw cw iv shadow; do
+  conda run -n CVCI python run_lalonde_experiment.py \
+    --target-mode rct \
+    --method cvci \
+    --obs-source cps \
+    --plugin "$p" \
+    --output-json "experiments/cvci_rct_cps_${p}.json"
+done
+```
+
+### Run three rounds and compute mean ATE / RMSE
+```bash
+mkdir -p experiments/cvci_rct_cps_3rounds
+for seed in 2024 2025 2026; do
+  for p in none ipsw cw iv shadow; do
+    conda run -n CVCI python run_lalonde_experiment.py \
+      --target-mode rct \
+      --method cvci \
+      --obs-source cps \
+      --plugin "$p" \
+      --seed "$seed" \
+      --output-json "experiments/cvci_rct_cps_3rounds/${p}_seed${seed}.json"
+  done
+done
+
+python - <<'PY'
+import json
+from pathlib import Path
+
+plugins = ["none", "ipsw", "cw", "iv", "shadow"]
+seeds = [2024, 2025, 2026]
+root = Path("experiments/cvci_rct_cps_3rounds")
+
+print("plugin,mean_ate_hat,mean_rmse")
+for p in plugins:
+    ate_vals, rmse_vals = [], []
+    for s in seeds:
+        obj = json.loads((root / f"{p}_seed{s}.json").read_text(encoding="utf-8"))
+        ate_vals.append(float(obj["ate_hat"]))
+        rmse_vals.append(float(obj["rmse"]))
+    print(f"{p},{sum(ate_vals)/len(ate_vals):.6f},{sum(rmse_vals)/len(rmse_vals):.6f}")
+PY
+```
 
 

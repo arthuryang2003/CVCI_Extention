@@ -173,8 +173,10 @@ def main():
         "plugin_metadata": {
             "screening_summary": plugin_output.metadata.get("screening_summary"),
             "selected_iv_names": plugin_output.metadata.get("selected_iv_names"),
+            "selected_iv_cols": plugin_output.metadata.get("selected_iv_cols"),
             "selected_iv_indices": plugin_output.metadata.get("selected_iv_indices"),
             "selected_shadow_name": plugin_output.metadata.get("selected_shadow_name"),
+            "selected_shadow_cols": plugin_output.metadata.get("selected_shadow_cols"),
             "selected_shadow_index": plugin_output.metadata.get("selected_shadow_index"),
             "selection_feature_names": plugin_output.metadata.get("selection_feature_names"),
             "shadow_feature_names": plugin_output.metadata.get("shadow_feature_names"),

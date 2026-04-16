@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -95,6 +95,25 @@ def _weight_summary(weights: np.ndarray) -> Dict[str, float]:
         "max": float(np.max(arr)),
         "std": float(np.std(arr)),
     }
+
+
+def _to_jsonable(value: Any) -> Any:
+    """Recursively convert experiment outputs into JSON-serializable structures."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (np.integer, np.floating, np.bool_)):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return [_to_jsonable(v) for v in value.tolist()]
+    if isinstance(value, (list, tuple, set)):
+        return [_to_jsonable(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, pd.Series):
+        return [_to_jsonable(v) for v in value.tolist()]
+    if isinstance(value, pd.DataFrame):
+        return _to_jsonable(value.to_dict(orient="list"))
+    return repr(value)
 
 
 def _ate_proxy_from_rct(df_rct: pd.DataFrame) -> float:
@@ -329,18 +348,20 @@ def _run_rhc(
 
 
 def _save_outputs(result: Dict[str, object], output_json: Optional[str], output_csv: Optional[str]) -> None:
+    json_safe_result = _to_jsonable(result)
+
     if output_json:
         output_path = Path(output_json)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
+        output_path.write_text(json.dumps(json_safe_result, indent=2, ensure_ascii=False), encoding="utf-8")
 
     if output_csv:
         output_path = Path(output_csv)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        row = dict(result)
+        row = dict(json_safe_result)
         row["x_cols"] = ",".join(result.get("x_cols", []))
-        row["plugin_summary"] = json.dumps(result.get("plugin_summary", {}))
-        row["data_split_summary"] = json.dumps(result.get("data_split_summary", {}))
+        row["plugin_summary"] = json.dumps(json_safe_result.get("plugin_summary", {}), ensure_ascii=False)
+        row["data_split_summary"] = json.dumps(json_safe_result.get("data_split_summary", {}), ensure_ascii=False)
         existing = pd.read_csv(output_path) if output_path.exists() else pd.DataFrame()
         updated = pd.concat([existing, pd.DataFrame([row])], ignore_index=True)
         updated.to_csv(output_path, index=False)
@@ -371,7 +392,7 @@ def main() -> None:
         result = _run_rhc(args, df_rct=df_rct, df_obs=df_obs, data_split_summary=split_summary)
 
     _save_outputs(result, output_json=args.output_json, output_csv=args.output_csv)
-    print(json.dumps(result, indent=2))
+    print(json.dumps(_to_jsonable(result), indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":

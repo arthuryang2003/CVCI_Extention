@@ -13,7 +13,8 @@ import pickle
 import json
 from datetime import date
 import os
-from rct.models import cross_validation, lalonde_get_data
+from rct.cv import cross_validation
+from rct.data import lalonde_get_data
 import dask
 import pandas as pd
 from rct.experiments.data_interface import get_lalonde_dataframe

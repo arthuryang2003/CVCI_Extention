@@ -17,7 +17,8 @@ import pickle
 import json
 from datetime import date
 import os
-from rct.models import model_class, compute_exp_minmizer, L_exp, L_obs, combined_loss, cross_validation, true_pi_func, tilde_pi_func, lalonde_get_data, generate_data
+from rct.cv import cross_validation
+from rct.data import lalonde_get_data
 import pandas as pd
 from rct.experiments.data_interface import get_lalonde_dataframe
 from sklearn.linear_model import LinearRegression 
@@ -157,5 +158,4 @@ with open(dir_path + filename + ".txt", "w") as f:
         f"obs only: {np.sqrt(obs_only_mean)}\n"
     )
     f.close()
-
 

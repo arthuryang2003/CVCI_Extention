@@ -24,7 +24,8 @@ import pandas as pd
 from rct.experiments.data_interface import get_lalonde_dataframe
 from utils.lalonde_utils import get_lalonde_default_covariates
 
-from rct.models import compute_exp_minmizer, lalonde_get_data
+from rct.data import lalonde_get_data
+from rct.losses import compute_exp_minmizer
 from rct.plugins import build_obs_plugin, fit_base_cvci, fit_cvci_with_plugin
 
 

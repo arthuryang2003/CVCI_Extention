@@ -1,8 +1,16 @@
 # Cross-Validated Causal Inference (CVCI)
 ## Repository Structure
 
-- `rct/`: methods where RCT data is the target (current CVCI implementation).
-- `obs/`: methods where OBS data is the target (placeholder for future implementation).
+- `rct/`: RCT-target CVCI package, with modular layers:
+  - `rct/data.py`: RCT-side data entrypoints and LaLonde adapters
+  - `rct/models.py`: model definitions
+  - `rct/losses.py`: experimental/observational/joint losses
+  - `rct/cv.py`: cross-validation
+  - `rct/plugins.py`: base/ipsw/cw/iv/shadow plugin builders
+  - `rct/estimator.py`: unified `RCTTargetBaseEstimator`
+  - `rct/runners/`: runnable entrypoints for examples and experiments
+- `obs/`: OBS-target package, with modular layers:
+  - `obs/data.py`, `obs/models.py`, `obs/plugins.py`, `obs/estimator.py`
 
 ## Paper
 [ArXiv link](http://arxiv.org/abs/2511.00727)
@@ -11,7 +19,7 @@
 ##  Example use
 Install missing packages if needed. In the terminal, run 
 ```
-python rct/example_use.py
+python -m rct.runners.example_use
 ```
 Results will be printed to the terminal.
 
@@ -117,31 +125,21 @@ The R Markdown (Rmd) script can be run in [RStudio](https://rmarkdown.rstudio.co
 
 To run the python scripts,
 
-Choice 1: Directly run 
+Recommended entrypoints (modular runners):
 ```
-python rct/lalonde_cv.py
-``` 
-or 
+python -m rct.runners.run_lalonde --task plugin_linear
+python -m rct.runners.run_lalonde --task cv
+python -m rct.runners.run_lalonde --task intro_mean
+python -m rct.runners.run_lalonde --task intro_linear
+python -m rct.runners.run_bootstrap
+python -m rct.runners.run_synthetic
 ```
-python rct/lalonde_cv_bootstrap.py
-```
-or 
-```
-python rct/lalonde_synthetic_linear.py
-``` 
-or 
-```
-python rct/lalonde_intro_mean.py
-```
-or 
-```
-python rct/lalonde_intro_linear.py
-```
+
+Original full-configuration scripts remain under `rct/experiments/` and can still be run directly (for example, `python -m rct.experiments.lalonde_cv`).
 
 Results are saved as JSON files (for data) and TXT files (for tables or texts).
 
 Choise 2: For scripts with full configurations, use a bash script and specify ``--cpus-per-task`` for parallel computing. For single configuration, use arguments specified in the script.
-
 
 
 

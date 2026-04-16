@@ -17,7 +17,9 @@ import pickle
 import json
 from datetime import date
 import os
-from rct.models import cross_validation, lalonde_get_data, t_test_normal_baseline 
+from rct.baselines import t_test_normal_baseline
+from rct.cv import cross_validation
+from rct.data import lalonde_get_data
 import dask
 import pandas as pd
 from rct.experiments.data_interface import get_lalonde_dataframe
@@ -120,5 +122,4 @@ with open(dir_path + filename + ".txt", "w") as f:
         f"obs only, mean and std: {np.mean(obs_only):.1f}  {np.std(obs_only):.1f} \n"
     )
     f.close()
-
 

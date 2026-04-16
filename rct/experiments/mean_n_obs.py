@@ -11,7 +11,8 @@ import pickle
 import json
 from datetime import date
 import os
-from rct.models import cross_validation, t_test_normal_baseline
+from rct.baselines import t_test_normal_baseline
+from rct.cv import cross_validation
 
 random_seed = 2024
 np.random.seed(random_seed)

@@ -1,8 +1,12 @@
 # Cross-Validated Causal Inference (CVCI)
 ## Recommended Package Structure (OBS-aligned)
-- `rct/data.py`: dataset loading/building utilities
-- `rct/models.py`: core estimation models and objectives
+- `rct/data.py`: dataset loading/building utilities + LaLonde array adapters
+- `rct/models.py`: model definitions
+- `rct/losses.py`: loss/objective components
+- `rct/cv.py`: cross-validation utilities
+- `rct/estimator.py`: unified estimator (`RCTTargetBaseEstimator`)
 - `rct/plugins.py`: plugin-facing API for bias correction methods
+- `rct/runners/`: runnable entrypoints
 - `rct/experiments/`: experiment scripts + unified data interface (`data_interface.py`)
 - `rct/read_lalonde_data.py`: lightweight compatibility entrypoint
 
@@ -29,7 +33,7 @@ python rct/read_lalonde_data.py
 ##  Example use
 Install missing packages if needed. In the terminal, run 
 ```
-python rct/example_use.py
+python -m rct.runners.example_use
 ```
 Results will be printed to the terminal.
 
@@ -133,9 +137,16 @@ The R Markdown (Rmd) script can be run in [RStudio](https://rmarkdown.rstudio.co
 
 ``lalonde_intro_linear.py``: For the intro figure, run our method on the LaLonde dataset (linear setting). Single configuration. 
 
-To run the python scripts,
-
-Choice 1: Directly run 
+To run the python scripts, either:
+```
+python -m rct.runners.run_lalonde --task plugin_linear
+python -m rct.runners.run_lalonde --task cv
+python -m rct.runners.run_lalonde --task intro_mean
+python -m rct.runners.run_lalonde --task intro_linear
+python -m rct.runners.run_bootstrap
+python -m rct.runners.run_synthetic
+```
+or directly run the experiment modules:
 ```
 python -m rct.experiments.lalonde_cv
 ``` 

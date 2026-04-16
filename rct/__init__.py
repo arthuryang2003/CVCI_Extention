@@ -13,6 +13,7 @@ from rct.data import (
     load_lalonde_csv,
     read_lalonde_txt_file,
     split_obs_target_groups,
+    lalonde_get_data,
 )
 
 __all__ = [
@@ -28,4 +29,14 @@ __all__ = [
     "split_obs_target_groups",
     "ensure_required_columns",
     "generate_lalonde_csv",
+    "lalonde_get_data",
+    "RCTTargetBaseEstimator",
 ]
+
+
+def __getattr__(name: str):
+    if name == "RCTTargetBaseEstimator":
+        from rct.estimator import RCTTargetBaseEstimator as _RCTTargetBaseEstimator
+
+        return _RCTTargetBaseEstimator
+    raise AttributeError(f"module 'rct' has no attribute {name!r}")

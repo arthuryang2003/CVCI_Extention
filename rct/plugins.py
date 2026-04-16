@@ -13,7 +13,7 @@ from methods.shadow import (
     fit_shadow_pipeline,
     screen_shadow_candidates,
 )
-from rct.models import cross_validation
+from rct.cv import cross_validation
 
 
 @dataclass

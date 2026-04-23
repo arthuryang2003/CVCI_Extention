@@ -23,9 +23,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--obs-source", type=str, default="cps", choices=["cps", "psid"])
     parser.add_argument("--x-cols", nargs="*", default=None)
     parser.add_argument("--seed", type=int, default=2024)
-    parser.add_argument("--truth-mode", type=str, default="proxy_ate", choices=["none", "proxy_ate", "synthetic_truth"])
+    parser.add_argument("--truth-mode", type=str, default="auto", choices=["auto", "none", "proxy_ate", "synthetic_truth"])
     parser.add_argument("--truth-value", type=float, default=None)
     parser.add_argument("--lalonde-path", type=str, default="lalonde.csv")
+    parser.add_argument("--data-mode", type=str, default="real", choices=["real", "semi_synthetic"])
+    parser.add_argument("--semisynth-effect-mode", type=str, default="constant", choices=["constant", "linear"])
+    parser.add_argument("--semisynth-truth-source", type=str, default="rct", choices=["rct", "pooled"])
+    parser.add_argument("--semisynth-noise-mode", type=str, default="groupwise", choices=["shared", "groupwise"])
+    parser.add_argument("--semisynth-seed", type=int, default=2024)
 
     parser.add_argument("--lambda-bin", type=int, default=5)
     parser.add_argument("--k-fold", type=int, default=5)
@@ -85,6 +90,16 @@ def _resolve_shadow_direction(arg_direction: str, target_mode: str) -> str:
     if mode == "obs":
         return "rct_to_obs"
     raise ValueError(f"Unsupported target_mode for shadow direction auto resolution: {target_mode}")
+
+
+def _resolve_truth_mode(arg_truth_mode: str, data_mode: str) -> str:
+    mode = str(arg_truth_mode).lower()
+    data_mode = str(data_mode).lower()
+    if mode != "auto":
+        return mode
+    if data_mode == "semi_synthetic":
+        return "synthetic_truth"
+    return "proxy_ate"
 
 
 def _weight_summary(weights: np.ndarray) -> Dict[str, float]:
@@ -370,6 +385,16 @@ def _save_outputs(result: Dict[str, object], output_json: Optional[str], output_
 def main() -> None:
     args = parse_args()
     np.random.seed(args.seed)
+    semisynth_config = None
+    if args.data_mode == "semi_synthetic":
+        semisynth_config = {
+            "effect_mode": str(args.semisynth_effect_mode),
+            "truth_source": str(args.semisynth_truth_source),
+            "noise_mode": str(args.semisynth_noise_mode),
+            "seed": int(args.semisynth_seed),
+        }
+
+    args.truth_mode = _resolve_truth_mode(args.truth_mode, data_mode=args.data_mode)
     if args.x_cols is None:
         raw_df = load_lalonde_csv(args.lalonde_path)
         args.x_cols = get_lalonde_default_covariates(raw_df)
@@ -384,12 +409,23 @@ def main() -> None:
         obs_source=args.obs_source,
         x_cols=args.x_cols,
         lalonde_path=args.lalonde_path,
+        data_mode=args.data_mode,
+        semisynth_config=semisynth_config,
     )
 
     if args.method == "cvci":
         result = _run_cvci(args, df_rct=df_rct, df_obs=df_obs, data_split_summary=split_summary)
     else:
         result = _run_rhc(args, df_rct=df_rct, df_obs=df_obs, data_split_summary=split_summary)
+
+    rct_true_ate = float(df_rct["tau_true"].mean()) if "tau_true" in df_rct.columns else None
+    obs_true_ate = float(df_obs["tau_true"].mean()) if "tau_true" in df_obs.columns else None
+    target_true_ate = rct_true_ate if args.target_mode == "rct" else obs_true_ate
+    result["data_mode"] = args.data_mode
+    result["semisynth_config"] = semisynth_config
+    result["target_true_ate"] = target_true_ate
+    result["rct_true_ate"] = rct_true_ate
+    result["obs_true_ate"] = obs_true_ate
 
     _save_outputs(result, output_json=args.output_json, output_csv=args.output_csv)
     print(json.dumps(_to_jsonable(result), indent=2, ensure_ascii=False))

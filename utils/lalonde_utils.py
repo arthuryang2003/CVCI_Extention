@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
+from utils.lalonde_semisynth import build_lalonde_semisynth_data
 
 LALONDE_RAW_COLUMNS: List[str] = [
     "treatment",
@@ -150,6 +151,8 @@ def load_lalonde_split(
     obs_source: str,
     x_cols: Optional[Sequence[str]] = None,
     lalonde_path: str = "lalonde.csv",
+    data_mode: str = "real",
+    semisynth_config: Optional[dict] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, object]]:
     """
     Unified Lalonde split entrypoint.
@@ -168,6 +171,9 @@ def load_lalonde_split(
     target_mode = str(target_mode).lower()
     if target_mode not in {"rct", "obs"}:
         raise ValueError(f"target_mode must be one of ['rct', 'obs'], got: {target_mode}")
+    data_mode = str(data_mode).lower()
+    if data_mode not in {"real", "semi_synthetic"}:
+        raise ValueError(f"data_mode must be one of ['real', 'semi_synthetic'], got: {data_mode}")
 
     obs_source = str(obs_source).lower()
     raw_df = load_lalonde_csv(lalonde_path)
@@ -176,23 +182,44 @@ def load_lalonde_split(
     x_cols = list(x_cols)
     ensure_required_columns(raw_df, x_cols + ["treatment", "re78", "group"], context="load_lalonde_split")
 
-    df_rct_raw, df_obs_raw = split_obs_target_groups(raw_df, obs_source=obs_source)
-    df_rct_raw = df_rct_raw.copy()
-    df_obs_raw = df_obs_raw.copy()
-    df_rct_raw["G"] = 1.0
-    df_obs_raw["G"] = 0.0
+    semisynth_cfg = dict(semisynth_config or {})
+    if data_mode == "semi_synthetic":
+        df_rct, df_obs, truth_summary = build_lalonde_semisynth_data(
+            raw_df=raw_df,
+            obs_source=obs_source,
+            x_cols=x_cols,
+            effect_mode=str(semisynth_cfg.get("effect_mode", "constant")),
+            truth_source=str(semisynth_cfg.get("truth_source", "rct")),
+            noise_mode=str(semisynth_cfg.get("noise_mode", "groupwise")),
+            seed=int(semisynth_cfg.get("seed", 2024)),
+        )
+    else:
+        df_rct_raw, df_obs_raw = split_obs_target_groups(raw_df, obs_source=obs_source)
+        df_rct_raw = df_rct_raw.copy()
+        df_obs_raw = df_obs_raw.copy()
+        df_rct_raw["G"] = 1.0
+        df_obs_raw["G"] = 0.0
 
-    df_rct = df_rct_raw[x_cols + ["treatment", "re78", "G"]].copy()
-    df_obs = df_obs_raw[x_cols + ["treatment", "re78", "G"]].copy()
-    df_rct = df_rct.rename(columns={"treatment": "T", "re78": "Y"})
-    df_obs = df_obs.rename(columns={"treatment": "T", "re78": "Y"})
+        keep_cols = list(dict.fromkeys(x_cols + ["treatment", "re78", "G"]))
+        # Preserve optional truth columns if caller precomputed them upstream.
+        optional_truth_cols = [c for c in ["tau_true", "y0_true", "y1_true"] if c in df_rct_raw.columns and c in df_obs_raw.columns]
+        keep_cols.extend(optional_truth_cols)
+
+        df_rct = df_rct_raw[keep_cols].copy().rename(columns={"treatment": "T", "re78": "Y"})
+        df_obs = df_obs_raw[keep_cols].copy().rename(columns={"treatment": "T", "re78": "Y"})
+        truth_summary = {}
+
     for frame in (df_rct, df_obs):
         frame["T"] = frame["T"].astype(float)
         frame["Y"] = frame["Y"].astype(float)
         frame["G"] = frame["G"].astype(float)
+        for col in ["tau_true", "y0_true", "y1_true"]:
+            if col in frame.columns:
+                frame[col] = frame[col].astype(float)
 
     summary = {
         "target_mode": target_mode,
+        "data_mode": data_mode,
         "obs_source": obs_source,
         "lalonde_path": lalonde_path,
         "g_semantics": {"1": "RCT", "0": "OBS"},
@@ -203,5 +230,10 @@ def load_lalonde_split(
         "n_obs_treated": int(df_obs["T"].sum()),
         "n_obs_control": int((1.0 - df_obs["T"]).sum()),
         "x_cols": x_cols,
+        "semisynth_config": semisynth_cfg if data_mode == "semi_synthetic" else None,
+        "true_ate_rct": truth_summary.get("true_ate_rct"),
+        "true_ate_obs": truth_summary.get("true_ate_obs"),
     }
+    if data_mode == "semi_synthetic":
+        summary["truth_summary"] = truth_summary
     return df_rct, df_obs, summary

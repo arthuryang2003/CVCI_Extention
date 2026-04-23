@@ -191,9 +191,21 @@ def run_one(target: str, dataset: str, method_label: str, seed: int, args: argpa
                 truth_value = None
             rmse = float(abs(estimate - truth_value)) if truth_value is not None else None
 
-        plugin_meta = payload.get("plugin_metadata") or {}
-        selected_iv_cols = plugin_meta.get("selected_iv_names") or plugin_meta.get("selected_iv_cols")
-        selected_shadow_cols = plugin_meta.get("selected_shadow_cols")
+        plugin_meta = payload.get("plugin_metadata") or payload.get("plugin_info") or {}
+        plugin_full = plugin_meta.get("full") if isinstance(plugin_meta.get("full"), dict) else {}
+        plugin_screening = plugin_meta.get("screening") if isinstance(plugin_meta.get("screening"), dict) else {}
+
+        selected_iv_cols = (
+            plugin_meta.get("selected_iv_names")
+            or plugin_meta.get("selected_iv_cols")
+            or plugin_full.get("selected_iv_cols")
+            or plugin_screening.get("selected_iv_cols")
+        )
+        selected_shadow_cols = (
+            plugin_meta.get("selected_shadow_cols")
+            or plugin_full.get("selected_shadow_cols")
+            or plugin_screening.get("selected_shadow_cols")
+        )
         if selected_iv_cols is not None:
             selected_iv_cols = [str(x) for x in selected_iv_cols]
         if selected_shadow_cols is not None:

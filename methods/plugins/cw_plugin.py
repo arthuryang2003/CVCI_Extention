@@ -33,6 +33,17 @@ def _build_balance_features(X: np.ndarray, degree: int = 1, include_interactions
     return np.hstack(feats)
 
 
+def _zscore_pair(X_rct: np.ndarray, X_obs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Apply shared z-score normalization to RCT/OBS covariates."""
+    X_rct = np.asarray(X_rct, dtype=float)
+    X_obs = np.asarray(X_obs, dtype=float)
+    pooled = np.vstack([X_rct, X_obs])
+    mean = np.mean(pooled, axis=0)
+    std = np.std(pooled, axis=0)
+    std = np.where(std < 1e-8, 1.0, std)
+    return (X_rct - mean) / std, (X_obs - mean) / std
+
+
 def _compute_calibration_weights(
     X_rct: np.ndarray,
     X_obs: np.ndarray,
@@ -40,8 +51,10 @@ def _compute_calibration_weights(
     include_interactions: bool,
     max_iter: int,
 ) -> Dict[str, object]:
-    F_rct = _build_balance_features(X_rct, degree=degree, include_interactions=include_interactions)
-    F_obs = _build_balance_features(X_obs, degree=degree, include_interactions=include_interactions)
+    # Shared z-score scaling improves CW numerical stability on heterogeneous LaLonde features.
+    X_rct_scaled, X_obs_scaled = _zscore_pair(X_rct, X_obs)
+    F_rct = _build_balance_features(X_rct_scaled, degree=degree, include_interactions=include_interactions)
+    F_obs = _build_balance_features(X_obs_scaled, degree=degree, include_interactions=include_interactions)
 
     F_rct_aug = np.hstack([np.ones((F_rct.shape[0], 1)), F_rct])
     target = np.mean(np.hstack([np.ones((F_obs.shape[0], 1)), F_obs]), axis=0)

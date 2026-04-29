@@ -306,6 +306,145 @@ def screen_shadow_candidates(
     }
 
 
+def screen_shadow_candidates_with_mode(
+    df: pd.DataFrame,
+    X_cols: Sequence[str],
+    t_col: str = "T",
+    y_col: str = "Y",
+    g_col: str = "G",
+    relevance_threshold: float = 0.02,
+    independence_threshold: float = 0.02,
+    allow_empty_fallback: bool = False,
+    relevance_group: Optional[str] = None,
+    shadow_direction: Optional[str] = None,
+    source_g: GroupLike = None,
+    target_g: GroupLike = None,
+    screening_mode: str = "screened",
+    top_k: Optional[int] = None,
+    force_candidate_cols: Optional[Sequence[str]] = None,
+) -> Dict[str, object]:
+    """Screen shadow candidates under ablation modes while preserving return compatibility."""
+    mode = str(screening_mode).lower()
+    if mode not in {"screened", "all", "topk"}:
+        raise ValueError(f"Unsupported screening_mode={screening_mode}. Expected one of screened/all/topk.")
+
+    x_cols = [str(c) for c in (force_candidate_cols if force_candidate_cols is not None else X_cols)]
+    if not x_cols:
+        raise ValueError("X_cols must be non-empty after applying force_candidate_cols.")
+
+    if mode == "screened":
+        result = screen_shadow_candidates(
+            df=df,
+            X_cols=x_cols,
+            t_col=t_col,
+            y_col=y_col,
+            g_col=g_col,
+            relevance_threshold=relevance_threshold,
+            independence_threshold=independence_threshold,
+            allow_empty_fallback=allow_empty_fallback,
+            relevance_group=relevance_group,
+            shadow_direction=shadow_direction,
+            source_g=source_g,
+            target_g=target_g,
+        )
+        result["screening_mode"] = mode
+        result["top_k"] = None
+        result["candidate_cols"] = x_cols
+        return result
+
+    required = [*x_cols, t_col, y_col, g_col]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns for shadow screening: {missing}")
+
+    resolved_source_g, resolved_target_g, resolved_direction = _resolve_shadow_direction(
+        shadow_direction=shadow_direction,
+        source_g=source_g,
+        target_g=target_g,
+    )
+    relevance_group_normalized = None if relevance_group is None else str(relevance_group).lower()
+    if relevance_group_normalized not in {None, "target", "source"}:
+        raise ValueError("relevance_group must be one of {None, 'target', 'source'}.")
+
+    if relevance_group_normalized is None:
+        df_rel = df
+    elif relevance_group_normalized == "target":
+        df_rel = df[df[g_col] == resolved_target_g]
+    else:
+        df_rel = df[df[g_col] == resolved_source_g]
+    if df_rel.empty:
+        raise ValueError(
+            f"Shadow relevance subset is empty for relevance_group={relevance_group_normalized}, "
+            f"source_g={resolved_source_g}, target_g={resolved_target_g}."
+        )
+
+    t_vec_rel = _to_1d_float(df_rel[t_col])
+    y_vec_rel = _to_1d_float(df_rel[y_col])
+    t_vec = _to_1d_float(df[t_col])
+    y_vec = _to_1d_float(df[y_col])
+    g_vec = _to_1d_float(df[g_col])
+
+    logs: List[Dict[str, object]] = []
+    for col in x_cols:
+        remaining = [x for x in x_cols if x != col]
+        z_vec_rel = _to_1d_float(df_rel[col])
+        z_vec = _to_1d_float(df[col])
+
+        nuisance_rel_parts = [t_vec_rel.reshape(-1, 1)]
+        nuisance_ind_parts = [y_vec.reshape(-1, 1), t_vec.reshape(-1, 1)]
+        if remaining:
+            nuisance_rel_parts.append(df_rel[remaining].to_numpy(dtype=float))
+            nuisance_ind_parts.append(df[remaining].to_numpy(dtype=float))
+
+        rel = float(partial_abs_corr(z_vec_rel, y_vec_rel, np.hstack(nuisance_rel_parts)))
+        ind = float(partial_abs_corr(z_vec, g_vec, np.hstack(nuisance_ind_parts)))
+        logs.append(
+            {
+                "column": col,
+                "relevance_score": rel,
+                "independence_score": ind,
+                "score": float(rel - ind),
+                "selected": False,
+                "relevance_threshold": float(relevance_threshold),
+                "independence_threshold": float(independence_threshold),
+            }
+        )
+
+    if mode == "all":
+        selected = list(x_cols)
+    else:
+        n_candidates = len(x_cols)
+        if top_k is None:
+            raise ValueError("top_k must be provided when screening_mode='topk'.")
+        k = int(top_k)
+        if k <= 0 or k > n_candidates:
+            raise ValueError(f"Invalid top_k={top_k}. Expected integer in [1, {n_candidates}] for topk mode.")
+        ranked = sorted(logs, key=lambda entry: float(entry["score"]), reverse=True)
+        selected = [str(entry["column"]) for entry in ranked[:k]]
+
+    selected_set = set(selected)
+    for entry in logs:
+        entry["selected"] = bool(entry["column"] in selected_set)
+    xc_cols = [x for x in x_cols if x not in selected_set]
+    resolved_top_k = None if mode != "topk" else int(top_k)
+    return {
+        "selected_shadow_cols": selected,
+        "Xc_cols": xc_cols,
+        "Xz_cols": selected,
+        "screening_logs": logs,
+        "relevance_threshold": float(relevance_threshold),
+        "independence_threshold": float(independence_threshold),
+        "allow_empty_fallback": bool(allow_empty_fallback),
+        "relevance_group": relevance_group_normalized,
+        "source_g": resolved_source_g,
+        "target_g": resolved_target_g,
+        "shadow_direction": resolved_direction,
+        "screening_mode": mode,
+        "top_k": resolved_top_k,
+        "candidate_cols": x_cols,
+    }
+
+
 def _resolve_xc_xz(
     Xc_cols: Optional[Sequence[str]] = None,
     Xz_cols: Optional[Sequence[str]] = None,

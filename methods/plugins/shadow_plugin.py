@@ -12,7 +12,7 @@ from methods.plugins.base import SelectionCorrectionPlugin
 from methods.shadow import (
     build_shadow_corrected_targets_for_rhc,
     fit_shadow_pipeline,
-    screen_shadow_candidates,
+    screen_shadow_candidates_with_mode,
 )
 
 
@@ -34,6 +34,9 @@ class ShadowPlugin(SelectionCorrectionPlugin):
     allow_empty_fallback: bool = False
     shadow_relevance_group: Optional[str] = None
     random_state: int = 2024
+    screening_mode: str = "screened"
+    top_k: Optional[int] = None
+    force_candidate_cols: Optional[Sequence[str]] = None
 
     def _log(self, message: str):
         if self.verbose:
@@ -54,7 +57,7 @@ class ShadowPlugin(SelectionCorrectionPlugin):
         x_cols = list(x_cols)
         df_all = pd.concat([df_rct, df_obs], axis=0, ignore_index=True)
 
-        screening = screen_shadow_candidates(
+        screening = screen_shadow_candidates_with_mode(
             df_all,
             X_cols=x_cols,
             t_col=a_col,
@@ -67,6 +70,9 @@ class ShadowPlugin(SelectionCorrectionPlugin):
             shadow_direction="rct_to_obs",
             source_g=1,
             target_g=0,
+            screening_mode=str(self.screening_mode),
+            top_k=self.top_k,
+            force_candidate_cols=self.force_candidate_cols,
         )
         selected_shadow_cols = list(screening["selected_shadow_cols"])
         xc_cols = list(screening["Xc_cols"])
@@ -107,6 +113,11 @@ class ShadowPlugin(SelectionCorrectionPlugin):
             "source_g": 1,
             "target_g": 0,
             "shadow_relevance_group": self.shadow_relevance_group,
+            "screening_mode": str(self.screening_mode),
+            "top_k": None if self.top_k is None else int(self.top_k),
+            "force_candidate_cols": None
+            if self.force_candidate_cols is None
+            else [str(c) for c in self.force_candidate_cols],
         }
         self._log(f"Selected shadow cols: {self.selected_shadow_cols_}")
         return self

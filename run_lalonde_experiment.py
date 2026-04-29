@@ -15,7 +15,7 @@ from obs.estimator import ObsTargetBaseEstimator
 from utils.lalonde_utils import get_lalonde_default_covariates, load_lalonde_csv, load_lalonde_split
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--target-mode", type=str, required=True, choices=["rct", "obs"])
     parser.add_argument("--method", type=str, required=True, choices=["cvci", "rhc"])
@@ -63,10 +63,13 @@ def parse_args() -> argparse.Namespace:
         default="none",
         choices=["none", "target", "source"],
     )
+    parser.add_argument("--screening-mode", type=str, default="screened", choices=["screened", "all", "topk"])
+    parser.add_argument("--top-k", type=int, default=None)
+    parser.add_argument("--force-candidate-cols", nargs="*", default=None)
 
     parser.add_argument("--output-json", type=str, default=None)
     parser.add_argument("--output-csv", type=str, default=None)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def _normalize_plugin_name(plugin: str) -> str:
@@ -189,6 +192,9 @@ def _build_rhc_plugin(
             exclusion_threshold=args.iv_exclusion_threshold,
             clip_min=args.iv_clip_min,
             clip_max=args.iv_clip_max,
+            screening_mode=args.screening_mode,
+            top_k=args.top_k,
+            force_candidate_cols=args.force_candidate_cols,
             verbose=False,
         )
     if args.plugin == "shadow":
@@ -204,6 +210,9 @@ def _build_rhc_plugin(
             allow_empty_fallback=args.shadow_allow_fallback,
             shadow_relevance_group=shadow_relevance_group,
             random_state=args.seed,
+            screening_mode=args.screening_mode,
+            top_k=args.top_k,
+            force_candidate_cols=args.force_candidate_cols,
             verbose=False,
         )
     raise ValueError(f"Unsupported plugin for RHC: {args.plugin}")
@@ -261,6 +270,9 @@ def _run_cvci(
         "iv_clip_min": float(args.iv_clip_min),
         "iv_clip_max": float(args.iv_clip_max),
         "cw_max_iter": int(args.cw_max_iter),
+        "screening_mode": str(args.screening_mode),
+        "top_k": None if args.top_k is None else int(args.top_k),
+        "force_candidate_cols": None if args.force_candidate_cols is None else [str(c) for c in args.force_candidate_cols],
     }
 
     plugin_output = build_obs_plugin(x_obs, x_exp, args.plugin, config)
@@ -284,10 +296,15 @@ def _run_cvci(
     )
 
     metadata = dict(plugin_output.metadata)
+    selected_shadow_cols = metadata.get("selected_shadow_cols")
+    selected_iv_cols = metadata.get("selected_iv_cols", metadata.get("selected_iv_names"))
     plugin_summary = {
         **metadata,
         "weight_summary": _weight_summary(plugin_output.sample_weights),
     }
+    screening_logs = plugin_summary.get("screening_logs")
+    if screening_logs is None and isinstance(plugin_summary.get("screening"), dict):
+        screening_logs = plugin_summary["screening"].get("screening_logs")
 
     return {
         "method": "cvci",
@@ -299,8 +316,15 @@ def _run_cvci(
         "lambda_opt": float(cvci_result["lambda_opt"]),
         "plugin_name": _normalize_plugin_name(args.plugin),
         "plugin_summary": plugin_summary,
-        "selected_shadow_cols": metadata.get("selected_shadow_cols"),
-        "selected_iv_cols": metadata.get("selected_iv_cols", metadata.get("selected_iv_names")),
+        "plugin_summary_json": json.dumps(_to_jsonable(plugin_summary), ensure_ascii=False),
+        "screening_logs_json": json.dumps(_to_jsonable(screening_logs), ensure_ascii=False),
+        "selected_shadow_cols": selected_shadow_cols,
+        "selected_iv_cols": selected_iv_cols,
+        "n_selected_shadow": int(len(selected_shadow_cols or [])),
+        "n_selected_iv": int(len(selected_iv_cols or [])),
+        "screening_mode": str(args.screening_mode),
+        "top_k": None if args.top_k is None else int(args.top_k),
+        "force_candidate_cols": None if args.force_candidate_cols is None else [str(c) for c in args.force_candidate_cols],
         "shadow_direction": resolved_shadow_direction,
         "shadow_relevance_group": shadow_relevance_group,
         "truth_type": truth_type,
@@ -341,6 +365,11 @@ def _run_rhc(
     )
 
     plugin_summary = estimator.summary().get("plugin_summary", {})
+    selected_shadow_cols = plugin_summary.get("selected_shadow_cols")
+    selected_iv_cols = plugin_summary.get("selected_iv_cols")
+    screening_logs = plugin_summary.get("screening_logs")
+    if screening_logs is None and isinstance(plugin_summary.get("screening"), dict):
+        screening_logs = plugin_summary["screening"].get("screening_logs")
 
     return {
         "method": "rhc",
@@ -352,8 +381,15 @@ def _run_rhc(
         "lambda_opt": None,
         "plugin_name": _normalize_plugin_name(args.plugin),
         "plugin_summary": plugin_summary,
-        "selected_shadow_cols": plugin_summary.get("selected_shadow_cols"),
-        "selected_iv_cols": plugin_summary.get("selected_iv_cols"),
+        "plugin_summary_json": json.dumps(_to_jsonable(plugin_summary), ensure_ascii=False),
+        "screening_logs_json": json.dumps(_to_jsonable(screening_logs), ensure_ascii=False),
+        "selected_shadow_cols": selected_shadow_cols,
+        "selected_iv_cols": selected_iv_cols,
+        "n_selected_shadow": int(len(selected_shadow_cols or [])),
+        "n_selected_iv": int(len(selected_iv_cols or [])),
+        "screening_mode": str(args.screening_mode),
+        "top_k": None if args.top_k is None else int(args.top_k),
+        "force_candidate_cols": None if args.force_candidate_cols is None else [str(c) for c in args.force_candidate_cols],
         "shadow_direction": resolved_shadow_direction,
         "shadow_relevance_group": shadow_relevance_group,
         "truth_type": truth_type,
@@ -375,6 +411,9 @@ def _save_outputs(result: Dict[str, object], output_json: Optional[str], output_
         output_path.parent.mkdir(parents=True, exist_ok=True)
         row = dict(json_safe_result)
         row["x_cols"] = ",".join(result.get("x_cols", []))
+        row["selected_iv_cols"] = json.dumps(_to_jsonable(result.get("selected_iv_cols")), ensure_ascii=False)
+        row["selected_shadow_cols"] = json.dumps(_to_jsonable(result.get("selected_shadow_cols")), ensure_ascii=False)
+        row["force_candidate_cols"] = json.dumps(_to_jsonable(result.get("force_candidate_cols")), ensure_ascii=False)
         row["plugin_summary"] = json.dumps(json_safe_result.get("plugin_summary", {}), ensure_ascii=False)
         row["data_split_summary"] = json.dumps(json_safe_result.get("data_split_summary", {}), ensure_ascii=False)
         existing = pd.read_csv(output_path) if output_path.exists() else pd.DataFrame()
@@ -382,8 +421,7 @@ def _save_outputs(result: Dict[str, object], output_json: Optional[str], output_
         updated.to_csv(output_path, index=False)
 
 
-def main() -> None:
-    args = parse_args()
+def run_experiment(args: argparse.Namespace) -> Dict[str, object]:
     np.random.seed(args.seed)
     semisynth_config = None
     if args.data_mode == "semi_synthetic":
@@ -427,6 +465,12 @@ def main() -> None:
     result["rct_true_ate"] = rct_true_ate
     result["obs_true_ate"] = obs_true_ate
 
+    return result
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    args = parse_args(argv)
+    result = run_experiment(args)
     _save_outputs(result, output_json=args.output_json, output_csv=args.output_csv)
     print(json.dumps(_to_jsonable(result), indent=2, ensure_ascii=False))
 

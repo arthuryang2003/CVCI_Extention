@@ -10,7 +10,7 @@ Mathematical mapping:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Sequence, Union
+from typing import Dict, List, Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
@@ -150,6 +150,106 @@ def select_iv_candidates(
         "relevance_threshold": float(relevance_threshold),
         "exclusion_threshold": float(exclusion_threshold),
         "allow_empty_fallback": bool(allow_empty_fallback),
+    }
+
+
+def select_iv_candidates_with_mode(
+    df: pd.DataFrame,
+    candidate_cols: Sequence[str],
+    t_col: str = "T",
+    y_col: str = "Y",
+    g_col: str = "G",
+    relevance_threshold: float = 0.02,
+    exclusion_threshold: float = 0.02,
+    allow_empty_fallback: bool = True,
+    screening_mode: str = "screened",
+    top_k: Optional[int] = None,
+    force_candidate_cols: Optional[Sequence[str]] = None,
+) -> Dict[str, object]:
+    """Screen IV candidates under ablation modes while preserving return compatibility."""
+    mode = str(screening_mode).lower()
+    if mode not in {"screened", "all", "topk"}:
+        raise ValueError(f"Unsupported screening_mode={screening_mode}. Expected one of screened/all/topk.")
+
+    cols = [str(c) for c in (force_candidate_cols if force_candidate_cols is not None else candidate_cols)]
+    if not cols:
+        raise ValueError("candidate_cols must be non-empty after applying force_candidate_cols.")
+
+    if mode == "screened":
+        result = select_iv_candidates(
+            df=df,
+            candidate_cols=cols,
+            t_col=t_col,
+            y_col=y_col,
+            g_col=g_col,
+            relevance_threshold=relevance_threshold,
+            exclusion_threshold=exclusion_threshold,
+            allow_empty_fallback=allow_empty_fallback,
+        )
+        result["screening_mode"] = mode
+        result["top_k"] = None
+        result["candidate_cols"] = cols
+        return result
+
+    required = [*cols, t_col, y_col, g_col]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns for IV screening: {missing}")
+
+    t_vec = _to_1d_float(df[t_col])
+    y_vec = _to_1d_float(df[y_col])
+    g_vec = _to_1d_float(df[g_col])
+
+    logs: List[Dict[str, object]] = []
+    for col in cols:
+        remaining = [x for x in cols if x != col]
+        z_vec = _to_1d_float(df[col])
+        nuisance_parts = [t_vec.reshape(-1, 1)]
+        if remaining:
+            nuisance_parts.append(df[remaining].to_numpy(dtype=float))
+        nuisance = np.hstack(nuisance_parts)
+
+        rel = float(partial_abs_corr(z_vec, g_vec, nuisance))
+        exc = float(partial_abs_corr(z_vec, y_vec, nuisance))
+        logs.append(
+            {
+                "column": col,
+                "relevance_score": rel,
+                "exclusion_score": exc,
+                "score": float(rel - exc),
+                "selected": False,
+                "relevance_threshold": float(relevance_threshold),
+                "exclusion_threshold": float(exclusion_threshold),
+            }
+        )
+
+    if mode == "all":
+        selected = list(cols)
+    else:
+        n_candidates = len(cols)
+        if top_k is None:
+            raise ValueError("top_k must be provided when screening_mode='topk'.")
+        k = int(top_k)
+        if k <= 0 or k > n_candidates:
+            raise ValueError(f"Invalid top_k={top_k}. Expected integer in [1, {n_candidates}] for topk mode.")
+        ranked = sorted(logs, key=lambda entry: float(entry["score"]), reverse=True)
+        selected = [str(entry["column"]) for entry in ranked[:k]]
+
+    selected_set = set(selected)
+    for entry in logs:
+        entry["selected"] = bool(entry["column"] in selected_set)
+    xc_cols = [c for c in cols if c not in selected_set]
+    resolved_top_k = None if mode != "topk" else int(top_k)
+    return {
+        "selected_iv_cols": selected,
+        "Xc_cols": xc_cols,
+        "screening_logs": logs,
+        "relevance_threshold": float(relevance_threshold),
+        "exclusion_threshold": float(exclusion_threshold),
+        "allow_empty_fallback": bool(allow_empty_fallback),
+        "screening_mode": mode,
+        "top_k": resolved_top_k,
+        "candidate_cols": cols,
     }
 
 

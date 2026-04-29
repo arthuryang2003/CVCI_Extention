@@ -7,11 +7,11 @@ from scipy.optimize import minimize
 from scipy.stats import pearsonr
 from sklearn.linear_model import LinearRegression, LogisticRegression
 
-from methods.iv import fit_iv_pipeline, select_iv_candidates
+from methods.iv import fit_iv_pipeline, select_iv_candidates_with_mode
 from methods.shadow import (
     build_shadow_obs_outcomes_for_cvci,
     fit_shadow_pipeline,
-    screen_shadow_candidates,
+    screen_shadow_candidates_with_mode,
 )
 from rct.cv import cross_validation
 
@@ -582,7 +582,11 @@ def _build_iv_plugin(obs_data: np.ndarray, exp_data: np.ndarray, config: Dict[st
     exclusion_threshold = float(config.get("iv_exclusion_alpha", 0.02))
     allow_fallback = bool(config.get("iv_allow_fallback", True))
 
-    screening = select_iv_candidates(
+    screening_mode = str(config.get("screening_mode", "screened")).lower()
+    top_k = config.get("top_k")
+    force_candidate_cols = config.get("force_candidate_cols")
+
+    screening = select_iv_candidates_with_mode(
         df_all,
         candidate_cols=covariate_names,
         t_col="T",
@@ -591,6 +595,9 @@ def _build_iv_plugin(obs_data: np.ndarray, exp_data: np.ndarray, config: Dict[st
         relevance_threshold=relevance_threshold,
         exclusion_threshold=exclusion_threshold,
         allow_empty_fallback=allow_fallback,
+        screening_mode=screening_mode,
+        top_k=top_k,
+        force_candidate_cols=force_candidate_cols,
     )
     selected_iv_cols = list(screening["selected_iv_cols"])
     xc_cols = list(screening["Xc_cols"])
@@ -625,6 +632,9 @@ def _build_iv_plugin(obs_data: np.ndarray, exp_data: np.ndarray, config: Dict[st
             "screening_summary": screening,
             "Xc_cols": xc_cols,
             "Xz_cols": selected_iv_cols,
+            "screening_mode": screening_mode,
+            "top_k": None if top_k is None else int(top_k),
+            "force_candidate_cols": None if force_candidate_cols is None else [str(c) for c in force_candidate_cols],
             "selection_formula": "w_iv=(1-pi)/pi with pi from eta+lambda logistic decomposition",
         },
     )
@@ -664,7 +674,11 @@ def _build_shadow_plugin(obs_data: np.ndarray, exp_data: np.ndarray, config: Dic
     df_obs["G"] = 0.0
 
     df_all = pd.concat([df_exp, df_obs], axis=0, ignore_index=True)
-    screening = screen_shadow_candidates(
+    screening_mode = str(config.get("screening_mode", "screened")).lower()
+    top_k = config.get("top_k")
+    force_candidate_cols = config.get("force_candidate_cols")
+
+    screening = screen_shadow_candidates_with_mode(
         df_all,
         X_cols=covariate_names,
         t_col="T",
@@ -677,6 +691,9 @@ def _build_shadow_plugin(obs_data: np.ndarray, exp_data: np.ndarray, config: Dic
         shadow_direction=shadow_direction,
         source_g=source_g,
         target_g=target_g,
+        screening_mode=screening_mode,
+        top_k=top_k,
+        force_candidate_cols=force_candidate_cols,
     )
     selected_shadow_cols = list(screening["selected_shadow_cols"])
     xc_cols = list(screening["Xc_cols"])
@@ -723,6 +740,9 @@ def _build_shadow_plugin(obs_data: np.ndarray, exp_data: np.ndarray, config: Dic
             "shadow_direction": shadow_direction,
             "source_g": source_g,
             "target_g": target_g,
+            "screening_mode": screening_mode,
+            "top_k": None if top_k is None else int(top_k),
+            "force_candidate_cols": None if force_candidate_cols is None else [str(c) for c in force_candidate_cols],
             "pseudo_outcome_type": "obs_to_rct_shadow_outcome",
             "description": "Shadow correction replaces observational outcomes used by obs_outcomes in L_obs substitution.",
         },

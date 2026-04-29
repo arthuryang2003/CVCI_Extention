@@ -8,7 +8,7 @@ from typing import Optional, Sequence
 import numpy as np
 import pandas as pd
 
-from methods.iv import fit_iv_pipeline, select_iv_candidates
+from methods.iv import fit_iv_pipeline, select_iv_candidates_with_mode
 from methods.plugins.base import SelectionCorrectionPlugin
 from utils.weight_utils import ensure_1d_float, finalize_weights, weight_summary
 
@@ -33,6 +33,9 @@ class SelectionIVPlugin(SelectionCorrectionPlugin):
     clip_min: float = 0.05
     clip_max: float = 20.0
     model_type: str = "logistic"
+    screening_mode: str = "screened"
+    top_k: Optional[int] = None
+    force_candidate_cols: Optional[Sequence[str]] = None
     verbose: bool = True
 
     def _log(self, message: str):
@@ -47,7 +50,7 @@ class SelectionIVPlugin(SelectionCorrectionPlugin):
         if not candidate_cols:
             raise ValueError("SelectionIVPlugin has empty candidate_cols after screening configuration.")
 
-        screening_result = select_iv_candidates(
+        screening_result = select_iv_candidates_with_mode(
             df_all,
             candidate_cols=candidate_cols,
             t_col=a_col,
@@ -56,6 +59,9 @@ class SelectionIVPlugin(SelectionCorrectionPlugin):
             relevance_threshold=float(self.relevance_threshold),
             exclusion_threshold=float(self.exclusion_threshold),
             allow_empty_fallback=True,
+            screening_mode=str(self.screening_mode),
+            top_k=self.top_k,
+            force_candidate_cols=self.force_candidate_cols,
         )
         selected_iv_cols = list(screening_result["selected_iv_cols"])
         xc_cols = list(screening_result["Xc_cols"])
@@ -85,6 +91,11 @@ class SelectionIVPlugin(SelectionCorrectionPlugin):
             "selected_iv_cols": self.selected_iv_cols_,
             "Xc_cols": xc_cols,
             "Xz_cols": self.selected_iv_cols_,
+            "screening_mode": str(self.screening_mode),
+            "top_k": None if self.top_k is None else int(self.top_k),
+            "force_candidate_cols": None
+            if self.force_candidate_cols is None
+            else [str(c) for c in self.force_candidate_cols],
             "weight_summary": weight_summary(self.weights_),
         }
         return self

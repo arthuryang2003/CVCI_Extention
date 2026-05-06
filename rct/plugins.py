@@ -522,13 +522,14 @@ def _build_cw_plugin(obs_data: np.ndarray, exp_data: np.ndarray, config: Dict[st
     exp_features = _extract_design(exp_data, d_exp, include_treatment=include_treatment)
     obs_aug = np.concatenate((np.ones((obs_features.shape[0], 1)), obs_features), axis=1)
     target_moments = np.mean(np.concatenate((np.ones((exp_features.shape[0], 1)), exp_features), axis=1), axis=0)
+    exp_clip = float(config.get("cw_exp_clip", 50.0))
 
     def dual_objective(gamma: np.ndarray) -> float:
-        linear_term = obs_aug @ gamma
+        linear_term = np.clip(obs_aug @ gamma, -exp_clip, exp_clip)
         return np.mean(np.exp(linear_term)) - target_moments @ gamma
 
     def dual_gradient(gamma: np.ndarray) -> np.ndarray:
-        linear_term = obs_aug @ gamma
+        linear_term = np.clip(obs_aug @ gamma, -exp_clip, exp_clip)
         exp_term = np.exp(linear_term).reshape(-1, 1)
         return np.mean(obs_aug * exp_term, axis=0) - target_moments
 
@@ -540,9 +541,25 @@ def _build_cw_plugin(obs_data: np.ndarray, exp_data: np.ndarray, config: Dict[st
         options={"maxiter": max_iter},
     )
     if not result.success:
-        raise RuntimeError(f"CW optimization failed: {result.message}")
+        gamma_bound = float(config.get("cw_gamma_bound", 10.0))
+        bounds = [(-gamma_bound, gamma_bound)] * obs_aug.shape[1]
+        result = minimize(
+            dual_objective,
+            np.zeros(obs_aug.shape[1], dtype=float),
+            jac=dual_gradient,
+            method="L-BFGS-B",
+            bounds=bounds,
+            options={"maxiter": max_iter},
+        )
+    used_fallback_iterate = False
+    if not result.success:
+        if np.all(np.isfinite(result.x)):
+            used_fallback_iterate = True
+        else:
+            raise RuntimeError(f"CW optimization failed: {result.message}")
 
-    weights = np.exp(obs_aug @ result.x)
+    linear_term = np.clip(obs_aug @ result.x, -exp_clip, exp_clip)
+    weights = np.exp(linear_term)
     weights = _normalize_weights(weights)
 
     return ObsPluginOutput(
@@ -556,6 +573,7 @@ def _build_cw_plugin(obs_data: np.ndarray, exp_data: np.ndarray, config: Dict[st
             "optimization_result": result,
             "include_treatment": include_treatment,
             "target_moments": target_moments,
+            "used_fallback_iterate": used_fallback_iterate,
         },
     )
 

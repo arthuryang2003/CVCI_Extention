@@ -15,8 +15,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from run_lalonde_experiment import parse_args as parse_unified_args
-from run_lalonde_experiment import run_experiment
+from run_experiment import parse_args as parse_unified_args
+from run_experiment import run_experiment
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,6 +54,8 @@ def _run_one(
 ) -> Dict[str, object]:
     method = "cvci" if target_mode == "rct" else "rhc"
     cli = [
+        "--dataset",
+        "lalonde",
         "--target-mode",
         target_mode,
         "--method",

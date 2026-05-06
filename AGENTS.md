@@ -3,13 +3,18 @@
 ## 项目结构与模块组织
 核心 Python 包按目标域划分：`rct/`（RCT 目标估计器、runner 与实验）、`obs/`（OBS 目标估计器栈）、`methods/plugins/`（共享插件实现，如 `ipsw`、`cw`、`iv`、`shadow`）。
 
-顶层实验编排在 `run_lalonde_experiment.py` 与 `experiments/`（基准脚本、输出与图表）。数据输入位于 `data/`，`lalonde.csv` 在仓库根目录。通用工具在 `utils/`；分析与绘图脚本在 `analysis/`。
+顶层实验编排在 `run_experiment.py` 与 `experiments/`（基准脚本、输出与图表）。数据输入位于 `data/`，`lalonde.csv` 在仓库根目录。通用工具在 `utils/`；分析与绘图脚本在 `analysis/`。
+
+## 运行环境约定
+默认实验环境为 conda 环境 `CVCI`。后续命令优先使用：
+
+- `conda run -n CVCI python ...`
 
 ## 构建、测试与开发命令
 请在仓库根目录使用模块方式运行：
 
 - `python -m rct.runners.example_use`：快速功能性自检。
-- `python run_lalonde_experiment.py --target-mode rct --method cvci --obs-source cps --plugin iv`：运行一次可配置的 LaLonde 实验。
+- `python run_experiment.py --dataset lalonde --target-mode rct --method cvci --obs-source cps --plugin iv`：运行一次可配置实验。
 - `python -m rct.runners.run_lalonde --task cv`：运行推荐的 LaLonde CV 任务。
 - `python -m rct.experiments.generate_lalonde_csv --data-dir data --output-path lalonde.csv`：从原始 `.txt` 重新生成合并 CSV。
 - `python experiments/smoke_selection_plugins.py`：对插件选择路径做 smoke 测试。
@@ -24,7 +29,7 @@
 
 - 修改估计器后运行 `python -m rct.runners.example_use`。
 - 修改插件或筛选逻辑后运行 `python experiments/smoke_selection_plugins.py`。
-- 修改实验流水线后，用 `run_lalonde_experiment.py` 跑单个 seed，并检查 JSON 输出字段（`ate_hat`、`rmse`、插件摘要）。
+- 修改实验流水线后，用 `run_experiment.py` 跑单个 seed，并检查 JSON 输出字段（`ate_hat`、`rmse`、插件摘要）。
 
 新增 smoke/回归脚本命名建议：`experiments/smoke_<feature>.py`。
 

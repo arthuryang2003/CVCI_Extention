@@ -13,6 +13,7 @@ from methods.shadow import (
     fit_shadow_pipeline,
     screen_shadow_candidates_with_mode,
 )
+from methods.shadow_source_ep import fit_shadow_source_ep_pipeline
 from rct.cv import cross_validation
 
 
@@ -440,6 +441,8 @@ def build_obs_plugin(obs_data: np.ndarray, exp_data: np.ndarray, method: str, co
         return _build_iv_plugin(obs_data, exp_data, config)
     if method == "shadow":
         return _build_shadow_plugin(obs_data, exp_data, config)
+    if method == "shadow_source_ep":
+        return _build_shadow_source_ep_plugin(obs_data, exp_data, config)
     raise ValueError(f"Unsupported plugin method: {method}")
 
 
@@ -763,5 +766,98 @@ def _build_shadow_plugin(obs_data: np.ndarray, exp_data: np.ndarray, config: Dic
             "force_candidate_cols": None if force_candidate_cols is None else [str(c) for c in force_candidate_cols],
             "pseudo_outcome_type": "obs_to_rct_shadow_outcome",
             "description": "Shadow correction replaces observational outcomes used by obs_outcomes in L_obs substitution.",
+        },
+    )
+
+
+def _build_shadow_source_ep_plugin(obs_data: np.ndarray, exp_data: np.ndarray, config: Dict[str, Any]) -> ObsPluginOutput:
+    d_obs = config.get("d_obs")
+    d_exp = config.get("d_exp")
+    if d_obs is None or d_exp is None:
+        raise ValueError("d_exp and d_obs must be provided in config for the shadow_source_ep plugin.")
+    if d_obs != d_exp:
+        raise ValueError("shadow_source_ep currently requires d_obs == d_exp.")
+
+    covariate_names = _safe_column_names(config, d_obs)
+    full_df = pd.DataFrame(
+        np.concatenate((exp_data, obs_data), axis=0),
+        columns=[*covariate_names, "T", "Y"],
+    )
+    full_df["G"] = np.concatenate(
+        (
+            np.ones(exp_data.shape[0], dtype=float),
+            np.zeros(obs_data.shape[0], dtype=float),
+        )
+    )
+
+    shadow_direction = str(config.get("shadow_direction", "obs_to_rct")).lower()
+    if shadow_direction != "obs_to_rct":
+        raise ValueError(
+            f"RCT-target shadow_source_ep plugin requires shadow_direction='obs_to_rct', got {shadow_direction}."
+        )
+    screening = screen_shadow_candidates_with_mode(
+        full_df,
+        X_cols=covariate_names,
+        t_col="T",
+        y_col="Y",
+        g_col="G",
+        relevance_threshold=float(config.get("shadow_association_threshold", 0.02)),
+        independence_threshold=float(config.get("shadow_residual_independence_threshold", 0.02)),
+        allow_empty_fallback=bool(config.get("shadow_allow_fallback", False)),
+        relevance_group=config.get("shadow_relevance_group"),
+        shadow_direction=shadow_direction,
+        screening_mode=str(config.get("screening_mode", "screened")),
+        top_k=config.get("top_k"),
+        force_candidate_cols=config.get("force_candidate_cols"),
+    )
+
+    # shadow_source_ep is a simplified engineering version, not full shadow
+    # identification. It directly learns P(G=1|Xc,T,Y) and preserves the output
+    # interface so a future shadow-identification backend can replace it.
+    fitted = fit_shadow_source_ep_pipeline(
+        df=full_df,
+        Xc_cols=screening["Xc_cols"],
+        Xz_cols=screening["selected_shadow_cols"],
+        treatment_col="T",
+        outcome_col="Y",
+        source_col="G",
+        target="rct",
+        clip=float(config.get("shadow_source_ep_clip", 0.05)),
+        random_state=int(config.get("random_state", 42)),
+        return_model=True,
+    )
+
+    obs_slice = slice(exp_data.shape[0], full_df.shape[0])
+    weights = _normalize_weights(np.asarray(fitted["sample_weight"][obs_slice], dtype=float))
+    pi_obs = np.asarray(fitted["pi_shadow"][obs_slice], dtype=float)
+    weight_to_rct_obs = np.asarray(fitted["weight_to_rct"][obs_slice], dtype=float)
+    weight_to_obs_obs = np.asarray(fitted["weight_to_obs"][obs_slice], dtype=float)
+
+    return ObsPluginOutput(
+        method="shadow_source_ep",
+        sample_weights=weights,
+        pseudo_outcome=None,
+        corrected_score=None,
+        corrected_loss_component={"type": "weighted_obs_loss_shadow_source_ep"},
+        metadata={
+            "method": "shadow_source_ep",
+            "selected_shadow_cols": list(fitted["selected_shadow_cols"]),
+            "Xc_cols": list(screening["Xc_cols"]),
+            "Xz_cols": list(screening["selected_shadow_cols"]),
+            "screening_logs": screening["screening_logs"],
+            "screening": screening,
+            "probability_features": list(fitted["probability_features"]),
+            "pi_shadow_mean": float(np.mean(pi_obs)),
+            "pi_shadow_min": float(np.min(pi_obs)),
+            "pi_shadow_max": float(np.max(pi_obs)),
+            "mean_weight": float(np.mean(weights)),
+            "raw_weight_to_rct_mean": float(np.mean(weight_to_rct_obs)),
+            "raw_weight_to_obs_mean": float(np.mean(weight_to_obs_obs)),
+            "selection_formula": "pi_shadow=P(G=1|Xc,T,Y), w_rct=pi/(1-pi), w_obs=(1-pi)/pi",
+            "model": fitted["model"],
+            "description": (
+                "Simplified engineering shadow probability plugin. "
+                "Learns P(G=1|Xc,T,Y) without using Xz in the probability model."
+            ),
         },
     )

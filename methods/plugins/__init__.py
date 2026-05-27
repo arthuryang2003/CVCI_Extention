@@ -3,6 +3,7 @@ from methods.plugins.cw_plugin import CWPlugin
 from methods.plugins.ipsw_plugin import IPSWPlugin
 from methods.plugins.selection_iv_plugin import SelectionIVPlugin
 from methods.plugins.shadow_plugin import ShadowPlugin
+from methods.plugins.shadow_source_ep_plugin import ShadowSourceEPPlugin
 
 # Backward-compatible alias.
 IVPlugin = SelectionIVPlugin
@@ -14,4 +15,5 @@ __all__ = [
     "SelectionIVPlugin",
     "IVPlugin",
     "ShadowPlugin",
+    "ShadowSourceEPPlugin",
 ]

@@ -50,21 +50,47 @@ class SelectionIVPlugin(SelectionCorrectionPlugin):
         if not candidate_cols:
             raise ValueError("SelectionIVPlugin has empty candidate_cols after screening configuration.")
 
-        screening_result = select_iv_candidates_with_mode(
-            df_all,
-            candidate_cols=candidate_cols,
-            t_col=a_col,
-            y_col=y_col,
-            g_col=g_col,
-            relevance_threshold=float(self.relevance_threshold),
-            exclusion_threshold=float(self.exclusion_threshold),
-            allow_empty_fallback=True,
-            screening_mode=str(self.screening_mode),
-            top_k=self.top_k,
-            force_candidate_cols=self.force_candidate_cols,
-        )
-        selected_iv_cols = list(screening_result["selected_iv_cols"])
-        xc_cols = list(screening_result["Xc_cols"])
+        if self.force_candidate_cols is not None:
+            selected_iv_cols = [str(c) for c in self.force_candidate_cols]
+            missing = [c for c in selected_iv_cols if c not in set(candidate_cols)]
+            if missing:
+                raise ValueError(f"SelectionIVPlugin force_candidate_cols contains unknown columns: {missing}")
+            xc_cols = [c for c in candidate_cols if c not in set(selected_iv_cols)]
+            screening_result = {
+                "selected_iv_cols": selected_iv_cols,
+                "Xc_cols": xc_cols,
+                "screening_logs": [
+                    {
+                        "column": c,
+                        "selected": bool(c in set(selected_iv_cols)),
+                        "forced_selected": bool(c in set(selected_iv_cols)),
+                    }
+                    for c in candidate_cols
+                ],
+                "relevance_threshold": float(self.relevance_threshold),
+                "exclusion_threshold": float(self.exclusion_threshold),
+                "allow_empty_fallback": True,
+                "screening_mode": "forced",
+                "top_k": None,
+                "candidate_cols": candidate_cols,
+                "force_candidate_cols": selected_iv_cols,
+            }
+        else:
+            screening_result = select_iv_candidates_with_mode(
+                df_all,
+                candidate_cols=candidate_cols,
+                t_col=a_col,
+                y_col=y_col,
+                g_col=g_col,
+                relevance_threshold=float(self.relevance_threshold),
+                exclusion_threshold=float(self.exclusion_threshold),
+                allow_empty_fallback=True,
+                screening_mode=str(self.screening_mode),
+                top_k=self.top_k,
+                force_candidate_cols=self.force_candidate_cols,
+            )
+            selected_iv_cols = list(screening_result["selected_iv_cols"])
+            xc_cols = list(screening_result["Xc_cols"])
 
         all_weights = fit_iv_pipeline(
             df_all,

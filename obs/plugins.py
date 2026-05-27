@@ -7,6 +7,7 @@ from methods.plugins import (
     SelectionCorrectionPlugin,
     SelectionIVPlugin,
     ShadowPlugin,
+    ShadowSourceEPPlugin,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "SelectionIVPlugin",
     "IVPlugin",
     "ShadowPlugin",
+    "ShadowSourceEPPlugin",
 ]

@@ -41,6 +41,9 @@ class SelectionCorrectionPlugin:
         _ = df_rct
         return None
 
+    def get_rct_to_obs_weights(self, df_rct: pd.DataFrame) -> Optional[np.ndarray]:
+        return self.get_rct_weights(df_rct)
+
     def get_corrected_bias_target(
         self,
         df_rct: pd.DataFrame,

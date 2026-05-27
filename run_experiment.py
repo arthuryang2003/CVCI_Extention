@@ -1,4 +1,4 @@
-"""Unified experiment runner for LaLonde/ACTG/JTPA with RCT-target (CVCI) and OBS-target (RHC)."""
+"""Unified experiment runner for LaLonde/ACTG/JTPA with RCT-target (CVCI) and OBS-target methods."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from methods import CWPlugin, IPSWPlugin, SelectionCorrectionPlugin, SelectionIVPlugin, ShadowPlugin, ShadowSourceEPPlugin
-from obs.estimator import ObsTargetBaseEstimator
+from obs.estimator import IntegrativeObsEstimator, IntegrativeRLearnerObsEstimator, RHCObsEstimator
 from utils.dataset_utils import load_dataset_split
 
 
@@ -20,7 +20,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--dataset", type=str, default="lalonde", choices=["lalonde", "actg", "jtpa", "sim_obs_iv", "sim_obs_shadow"])
     parser.add_argument("--data-path", type=str, default=None)
     parser.add_argument("--target-mode", type=str, required=True, choices=["rct", "obs"])
-    parser.add_argument("--method", type=str, required=True, choices=["cvci", "rhc"])
+    parser.add_argument("--method", type=str, required=True, choices=["cvci", "rhc", "integrative", "integrative_rlearner"])
     parser.add_argument("--plugin", type=str, default="none", choices=["none", "shadow", "shadow_source_ep", "iv", "ipsw", "cw"])
 
     parser.add_argument("--obs-source", type=str, default="cps", choices=["cps", "psid"])
@@ -377,7 +377,7 @@ def _run_cvci(
     }
 
 
-def _run_rhc(
+def _run_obs_method(
     args: argparse.Namespace,
     df_rct: pd.DataFrame,
     df_obs: pd.DataFrame,
@@ -388,7 +388,14 @@ def _run_rhc(
     shadow_relevance_group = _normalize_shadow_relevance_group(args.shadow_relevance_group)
     plugin = _build_rhc_plugin(args, x_cols=x_cols, shadow_direction=resolved_shadow_direction, shadow_relevance_group=shadow_relevance_group)
 
-    estimator = ObsTargetBaseEstimator(plugin=plugin, model_type="linear", random_state=args.seed)
+    if args.method == "rhc":
+        estimator = RHCObsEstimator(plugin=plugin, model_type="linear", random_state=args.seed)
+    elif args.method == "integrative":
+        estimator = IntegrativeObsEstimator(plugin=plugin, model_type="linear", random_state=args.seed)
+    elif args.method == "integrative_rlearner":
+        estimator = IntegrativeRLearnerObsEstimator(plugin=plugin, model_type="linear", random_state=args.seed)
+    else:
+        raise ValueError(f"Unsupported OBS-target method: {args.method}")
     estimator.fit(df_rct=df_rct, df_obs=df_obs, x_cols=x_cols, a_col="T", y_col="Y", g_col="G")
 
     X_eval = df_obs[x_cols].to_numpy(dtype=float)
@@ -406,7 +413,8 @@ def _run_rhc(
         data_mode=args.data_mode,
     )
 
-    plugin_summary = estimator.summary().get("plugin_summary", {})
+    estimator_summary = estimator.summary()
+    plugin_summary = estimator_summary.get("plugin_summary", {})
     selected_shadow_cols = plugin_summary.get("selected_shadow_cols")
     selected_iv_cols = plugin_summary.get("selected_iv_cols")
     screening_logs = plugin_summary.get("screening_logs")
@@ -414,7 +422,7 @@ def _run_rhc(
         screening_logs = plugin_summary["screening"].get("screening_logs")
 
     return {
-        "method": "rhc",
+        "method": str(args.method),
         "selection_method": str(plugin.name),
         "target_mode": "obs",
         "obs_source": args.obs_source,
@@ -448,6 +456,12 @@ def _run_rhc(
         "obs_naive_gap": obs_naive_gap,
         "proxy_abs_error": proxy_abs_error,
         "data_split_summary": data_split_summary,
+        "tau0_mean": estimator_summary.get("tau0_mean"),
+        "bG_mean": estimator_summary.get("bG_mean"),
+        "bT_mean": estimator_summary.get("bT_mean"),
+        "raw_rct_tau_mean": estimator_summary.get("raw_rct_tau_mean"),
+        "tau0_anchor_mean": estimator_summary.get("tau0_anchor_mean"),
+        "obs_biased_tau_mean": estimator_summary.get("obs_biased_tau_mean"),
     }
 
 
@@ -490,8 +504,8 @@ def run_experiment(args: argparse.Namespace) -> Dict[str, object]:
 
     if args.target_mode == "rct" and args.method != "cvci":
         raise ValueError("For target_mode='rct', method must be 'cvci'.")
-    if args.target_mode == "obs" and args.method != "rhc":
-        raise ValueError("For target_mode='obs', method must be 'rhc'.")
+    if args.target_mode == "obs" and args.method not in {"rhc", "integrative", "integrative_rlearner"}:
+        raise ValueError("For target_mode='obs', method must be one of rhc/integrative/integrative_rlearner.")
 
     effective_data_path = args.data_path
     if args.dataset == "lalonde":
@@ -517,7 +531,7 @@ def run_experiment(args: argparse.Namespace) -> Dict[str, object]:
     if args.method == "cvci":
         result = _run_cvci(args, df_rct=df_rct, df_obs=df_obs, data_split_summary=split_summary)
     else:
-        result = _run_rhc(args, df_rct=df_rct, df_obs=df_obs, data_split_summary=split_summary)
+        result = _run_obs_method(args, df_rct=df_rct, df_obs=df_obs, data_split_summary=split_summary)
 
     rct_true_ate = float(df_rct["tau_true"].mean()) if "tau_true" in df_rct.columns else None
     obs_true_ate = float(df_obs["tau_true"].mean()) if "tau_true" in df_obs.columns else None

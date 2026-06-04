@@ -154,6 +154,31 @@ def _compute_rct_pseudo_effect(
     return _to_1d_float_array(pseudo)
 
 
+def _resolve_iv_effect_x_cols(x_cols, plugin_summary):
+    x_cols = list(x_cols)
+    summary = dict(plugin_summary or {})
+    selected_iv_cols = list(summary.get("selected_iv_cols") or [])
+    xz_cols = list(summary.get("Xz_cols") or [])
+    xc_cols = list(summary.get("Xc_cols") or [])
+
+    plugin_name = str(summary.get("plugin", "")).lower()
+    is_iv_plugin = plugin_name in {"selection_iv", "iv"} or (bool(selected_iv_cols) and bool(xz_cols))
+    if not is_iv_plugin:
+        effect_x_cols = list(x_cols)
+        excluded_iv_cols = []
+    elif xc_cols and set(xc_cols).issubset(set(x_cols)):
+        effect_x_cols = [c for c in x_cols if c in set(xc_cols)]
+        excluded_iv_cols = [c for c in x_cols if c not in set(effect_x_cols)]
+    else:
+        excluded_source = selected_iv_cols or xz_cols
+        excluded_iv_cols = [c for c in x_cols if c in set(excluded_source)]
+        effect_x_cols = [c for c in x_cols if c not in set(excluded_iv_cols)]
+
+    if not effect_x_cols:
+        raise ValueError("No effect covariates left after removing selection IV variables.")
+    return effect_x_cols, excluded_iv_cols
+
+
 @dataclass
 class _SelectionAnchor:
     """
@@ -162,7 +187,8 @@ class _SelectionAnchor:
 
     def __post_init__(self):
         self.tau_r_model_ = LinearBiasModel()
-        self.tau0_anchor_model_ = LinearBiasModel()
+        self.tau0_anchor_treated_model_ = LinearRegression()
+        self.tau0_anchor_control_model_ = LinearRegression()
         self.bG_model_ = LinearBiasModel()
         self.fitted_ = False
         self.summary_: Dict[str, object] = {}
@@ -170,13 +196,14 @@ class _SelectionAnchor:
     def fit(
         self,
         df_rct: pd.DataFrame,
-        x_cols: Sequence[str],
+        effect_x_cols: Sequence[str],
         plugin: SelectionCorrectionPlugin,
         a_col: str,
         y_col: str,
     ):
-        X_rct = df_rct[list(x_cols)].to_numpy(dtype=float)
-        pseudo_rct = _compute_rct_pseudo_effect(df_rct, x_cols=x_cols, a_col=a_col, y_col=y_col)
+        effect_x_cols = list(effect_x_cols)
+        X_rct = df_rct[effect_x_cols].to_numpy(dtype=float)
+        pseudo_rct = _compute_rct_pseudo_effect(df_rct, x_cols=effect_x_cols, a_col=a_col, y_col=y_col)
 
         self.tau_r_model_.fit(X_rct, pseudo_rct)
         weights = plugin.get_rct_weights(df_rct)
@@ -186,21 +213,53 @@ class _SelectionAnchor:
         if weights.shape[0] != df_rct.shape[0]:
             raise ValueError("Plugin returned RCT weights with invalid shape.")
 
-        self.tau0_anchor_model_.fit(X_rct, pseudo_rct, sample_weight=weights)
-        bG_target = self.tau_r_model_.predict(X_rct) - self.tau0_anchor_model_.predict(X_rct)
+        T = df_rct[a_col].to_numpy(dtype=float)
+        Y = df_rct[y_col].to_numpy(dtype=float)
+        treated_mask = T == 1
+        control_mask = T == 0
+        if treated_mask.sum() == 0 or control_mask.sum() == 0:
+            raise ValueError("RCT data must contain both treated and control samples.")
+
+        self.tau0_anchor_treated_model_.fit(
+            X_rct[treated_mask],
+            Y[treated_mask],
+            sample_weight=weights[treated_mask],
+        )
+        self.tau0_anchor_control_model_.fit(
+            X_rct[control_mask],
+            Y[control_mask],
+            sample_weight=weights[control_mask],
+        )
+
+        bG_target = self.tau_r_model_.predict(X_rct) - self.predict_tau0_anchor(X_rct)
         self.bG_model_.fit(X_rct, bG_target)
 
         tau_r_hat = self.tau_r_model_.predict(X_rct)
-        tau0_anchor_hat = self.tau0_anchor_model_.predict(X_rct)
+        tau0_anchor_hat = self.predict_tau0_anchor(X_rct)
         bG_hat = self.bG_model_.predict(X_rct)
         self.fitted_ = True
         self.summary_ = {
+            "anchor_estimator": "armwise_weighted_outcome_regression",
+            "effect_x_cols": effect_x_cols,
+            "rct_weight_min": float(np.min(weights)),
+            "rct_weight_mean": float(np.mean(weights)),
+            "rct_weight_max": float(np.max(weights)),
+            "rct_weight_std": float(np.std(weights)),
             "tau_r_mean": float(np.mean(tau_r_hat)),
             "tau0_anchor_mean": float(np.mean(tau0_anchor_hat)),
             "bG_mean": float(np.mean(bG_hat)),
             "bG_std": float(np.std(bG_hat)),
             "tau_r_model": self.tau_r_model_.summary(),
-            "tau0_anchor_model": self.tau0_anchor_model_.summary(),
+            "tau0_anchor_treated_model": {
+                "fitted": True,
+                "intercept": float(self.tau0_anchor_treated_model_.intercept_),
+                "coef": self.tau0_anchor_treated_model_.coef_.reshape(-1).tolist(),
+            },
+            "tau0_anchor_control_model": {
+                "fitted": True,
+                "intercept": float(self.tau0_anchor_control_model_.intercept_),
+                "coef": self.tau0_anchor_control_model_.coef_.reshape(-1).tolist(),
+            },
             "bG_model": self.bG_model_.summary(),
         }
         return self
@@ -211,9 +270,9 @@ class _SelectionAnchor:
         return self.tau_r_model_.predict(X)
 
     def predict_tau0_anchor(self, X: np.ndarray) -> np.ndarray:
-        if not self.fitted_:
+        if not hasattr(self.tau0_anchor_treated_model_, "coef_") or not hasattr(self.tau0_anchor_control_model_, "coef_"):
             raise RuntimeError("_SelectionAnchor is not fitted.")
-        return self.tau0_anchor_model_.predict(X)
+        return self.tau0_anchor_treated_model_.predict(X) - self.tau0_anchor_control_model_.predict(X)
 
     def predict_bG(self, X: np.ndarray) -> np.ndarray:
         if not self.fitted_:
@@ -362,7 +421,6 @@ class IntegrativeObsEstimator:
         x_cols = list(x_cols)
 
         df_all = pd.concat([df_rct, df_obs], ignore_index=True)
-        X_all = df_all[x_cols].to_numpy(dtype=float)
         T_all = _to_1d_float_array(df_all[a_col])
         Y_all = _to_1d_float_array(df_all[y_col])
         if g_col in df_all.columns:
@@ -372,14 +430,30 @@ class IntegrativeObsEstimator:
                 [np.ones(df_rct.shape[0], dtype=float), np.zeros(df_obs.shape[0], dtype=float)],
                 axis=0,
             )
-        if X_all.shape[0] != T_all.shape[0] or X_all.shape[0] != Y_all.shape[0] or X_all.shape[0] != G_all.shape[0]:
-            raise ValueError("Combined OBS/RCT arrays have inconsistent row counts.")
 
         self.plugin.fit(df_rct=df_rct, df_obs=df_obs, x_cols=x_cols, a_col=a_col, y_col=y_col, g_col=g_col)
-        self.anchor_ = _SelectionAnchor()
-        self.anchor_.fit(df_rct=df_rct, x_cols=x_cols, plugin=self.plugin, a_col=a_col, y_col=y_col)
+        plugin_summary = self.plugin.summary()
+        effect_x_cols, excluded_iv_cols = _resolve_iv_effect_x_cols(x_cols, plugin_summary)
+        X_effect_all = df_all[effect_x_cols].to_numpy(dtype=float)
+        if (
+            X_effect_all.shape[0] != T_all.shape[0]
+            or X_effect_all.shape[0] != Y_all.shape[0]
+            or X_effect_all.shape[0] != G_all.shape[0]
+        ):
+            raise ValueError("Combined OBS/RCT arrays have inconsistent row counts.")
 
-        Z_all = np.hstack([X_all, G_all.reshape(-1, 1)])
+        self.x_cols_ = list(x_cols)
+        self.effect_x_cols_ = list(effect_x_cols)
+        self.excluded_iv_cols_ = list(excluded_iv_cols)
+        self.effect_col_indices_ = [self.x_cols_.index(c) for c in self.effect_x_cols_]
+        self.a_col_ = a_col
+        self.y_col_ = y_col
+        self.g_col_ = g_col
+
+        self.anchor_ = _SelectionAnchor()
+        self.anchor_.fit(df_rct=df_rct, effect_x_cols=effect_x_cols, plugin=self.plugin, a_col=a_col, y_col=y_col)
+
+        Z_all = np.hstack([X_effect_all, G_all.reshape(-1, 1)])
         self.mu_model_ = _fit_mu_model(Z_all, Y_all)
         self.e_model_ = _fit_e_model(Z_all, T_all)
         mu_hat = _to_1d_float_array(self.mu_model_.predict(Z_all))
@@ -387,10 +461,10 @@ class IntegrativeObsEstimator:
 
         r_y = Y_all - mu_hat
         r_t = T_all - e_hat
-        bG_hat = _to_1d_float_array(self.anchor_.predict_bG(X_all))
+        bG_hat = _to_1d_float_array(self.anchor_.predict_bG(X_effect_all))
         target = r_y - r_t * G_all * bG_hat
 
-        Phi = _basis_with_intercept(X_all)
+        Phi = _basis_with_intercept(X_effect_all)
         design_tau = r_t[:, None] * Phi
         design_bT = (r_t * (1.0 - G_all))[:, None] * Phi
         design = np.hstack([design_tau, design_bT])
@@ -401,8 +475,8 @@ class IntegrativeObsEstimator:
         self.bT_coef_ = coef[p:]
         self.fitted_ = True
 
-        X_rct = df_rct[x_cols].to_numpy(dtype=float)
-        X_obs = df_obs[x_cols].to_numpy(dtype=float)
+        X_rct = df_rct[effect_x_cols].to_numpy(dtype=float)
+        X_obs = df_obs[effect_x_cols].to_numpy(dtype=float)
         tau0_obs = self.predict_tau(X_obs)
         bG_obs = self.predict_bG(X_obs)
         bT_obs = self.predict_bT(X_obs)
@@ -410,18 +484,17 @@ class IntegrativeObsEstimator:
         tau0_anchor_rct = self.anchor_.predict_tau0_anchor(X_rct)
         obs_biased_tau_obs = self.predict_obs_biased_tau(X_obs)
 
-        self.x_cols_ = x_cols
-        self.a_col_ = a_col
-        self.y_col_ = y_col
-        self.g_col_ = g_col
         self.rct_size_ = int(df_rct.shape[0])
         self.obs_size_ = int(df_obs.shape[0])
-        self.n_features_in_ = int(X_all.shape[1])
+        self.n_features_in_ = int(X_effect_all.shape[1])
         self.summary_ = {
             "model_type": self.model_type,
             "plugin": self.plugin.name,
             "rct_size": self.rct_size_,
             "obs_size": self.obs_size_,
+            "original_x_cols": self.x_cols_,
+            "effect_x_cols": self.effect_x_cols_,
+            "excluded_iv_cols": self.excluded_iv_cols_,
             "tau0_mean": float(np.mean(tau0_obs)),
             "bG_mean": float(np.mean(bG_obs)),
             "bT_mean": float(np.mean(bT_obs)),
@@ -438,7 +511,7 @@ class IntegrativeObsEstimator:
                 "e_hat_max": float(np.max(e_hat)),
             },
             "anchor_summary": self.anchor_.summary(),
-            "plugin_summary": self.plugin.summary(),
+            "plugin_summary": plugin_summary,
             **self._regularization_summary(),
         }
         return self
@@ -446,28 +519,52 @@ class IntegrativeObsEstimator:
     def _predict_linear(self, X: np.ndarray, coef: np.ndarray) -> np.ndarray:
         return _basis_with_intercept(X) @ _to_1d_float_array(coef)
 
-    def predict_tau(self, X: np.ndarray) -> np.ndarray:
+    def _extract_effect_X(self, X) -> np.ndarray:
         if not self.fitted_:
             raise RuntimeError("IntegrativeObsEstimator is not fitted.")
-        return self._predict_linear(X, self.tau_coef_)
+        if isinstance(X, pd.DataFrame):
+            return X[self.effect_x_cols_].to_numpy(dtype=float)
 
-    def predict_bT(self, X: np.ndarray) -> np.ndarray:
+        x_arr = np.asarray(X, dtype=float)
+        if x_arr.ndim == 1:
+            x_arr = x_arr.reshape(1, -1)
+        if x_arr.ndim != 2:
+            raise ValueError(f"Expected 2D X, got shape={x_arr.shape}.")
+        if x_arr.shape[1] == len(self.effect_x_cols_):
+            return x_arr
+        if x_arr.shape[1] == len(self.x_cols_):
+            return x_arr[:, self.effect_col_indices_]
+        raise ValueError(
+            "X has incompatible number of columns: "
+            f"got {x_arr.shape[1]}, expected {len(self.effect_x_cols_)} effect columns "
+            f"or {len(self.x_cols_)} original columns."
+        )
+
+    def predict_tau(self, X) -> np.ndarray:
         if not self.fitted_:
             raise RuntimeError("IntegrativeObsEstimator is not fitted.")
-        return self._predict_linear(X, self.bT_coef_)
+        X_effect = self._extract_effect_X(X)
+        return self._predict_linear(X_effect, self.tau_coef_)
 
-    def predict_bG(self, X: np.ndarray) -> np.ndarray:
+    def predict_bT(self, X) -> np.ndarray:
         if not self.fitted_:
             raise RuntimeError("IntegrativeObsEstimator is not fitted.")
-        return self.anchor_.predict_bG(X)
+        X_effect = self._extract_effect_X(X)
+        return self._predict_linear(X_effect, self.bT_coef_)
 
-    def predict_tau_r(self, X: np.ndarray) -> np.ndarray:
+    def predict_bG(self, X) -> np.ndarray:
+        if not self.fitted_:
+            raise RuntimeError("IntegrativeObsEstimator is not fitted.")
+        X_effect = self._extract_effect_X(X)
+        return self.anchor_.predict_bG(X_effect)
+
+    def predict_tau_r(self, X) -> np.ndarray:
         return self.predict_tau(X) + self.predict_bG(X)
 
-    def predict_obs_biased_tau(self, X: np.ndarray) -> np.ndarray:
+    def predict_obs_biased_tau(self, X) -> np.ndarray:
         return self.predict_tau(X) + self.predict_bT(X)
 
-    def estimate_ate(self, X: np.ndarray) -> float:
+    def estimate_ate(self, X) -> float:
         return float(np.mean(self.predict_tau(X)))
 
     def summary(self) -> Dict[str, object]:

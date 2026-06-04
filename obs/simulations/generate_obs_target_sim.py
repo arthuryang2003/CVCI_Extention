@@ -65,6 +65,7 @@ def generate_obs_target_simulation(
     alpha_t: float = 0.3,
     alpha_y: float = 0.6,
     alpha_iv: float = 0.8,
+    alpha_tau: float = 0.0,
     delta0: float = 0.0,
     delta1: float = 0.7,
 ) -> Dict[str, object]:
@@ -106,7 +107,15 @@ def generate_obs_target_simulation(
         z_shadow = y_obs + rng.normal(scale=float(sigma_z), size=n)
         shadow_cols = ["Z_shadow"]
 
-    p_g = _sigmoid(alpha0 + alpha_x * x1 + alpha_u * u + alpha_t * t_obs + alpha_y * y_obs + extra_term)
+    p_g = _sigmoid(
+        alpha0
+        + alpha_x * x1
+        + alpha_u * u
+        + alpha_t * t_obs
+        + alpha_y * y_obs
+        + alpha_tau * tau_true
+        + extra_term
+    )
     g = rng.binomial(1, p_g, size=n).astype(float)
 
     t_rct = rng.binomial(1, 0.5, size=n).astype(float)
@@ -172,6 +181,7 @@ def generate_obs_target_simulation(
             "alpha_t": float(alpha_t),
             "alpha_y": float(alpha_y),
             "alpha_iv": float(alpha_iv),
+            "alpha_tau": float(alpha_tau),
             "delta0": float(delta0),
             "delta1": float(delta1),
             "sigma_y": float(sigma_y),
@@ -258,6 +268,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--alpha_y", type=float, default=0.6)
     parser.add_argument("--alpha_u", type=float, default=0.6)
     parser.add_argument("--alpha_iv", type=float, default=0.8)
+    parser.add_argument("--alpha_tau", type=float, default=0.0)
     parser.add_argument("--beta_u", type=float, default=1.0)
     return parser.parse_args(argv)
 
@@ -277,6 +288,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             alpha_y=float(args.alpha_y),
             alpha_u=float(args.alpha_u),
             alpha_iv=float(args.alpha_iv),
+            alpha_tau=float(args.alpha_tau),
             beta_u=float(args.beta_u),
         )
         written = _write_simulation_outputs(sim_result, out_dir=out_dir)

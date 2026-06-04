@@ -398,7 +398,7 @@ def _run_obs_method(
         raise ValueError(f"Unsupported OBS-target method: {args.method}")
     estimator.fit(df_rct=df_rct, df_obs=df_obs, x_cols=x_cols, a_col="T", y_col="Y", g_col="G")
 
-    X_eval = df_obs[x_cols].to_numpy(dtype=float)
+    X_eval = df_obs[x_cols].copy()
     effect_pred = np.asarray(estimator.predict_tau(X_eval), dtype=float).reshape(-1)
     ate_hat = float(np.mean(effect_pred))
 
@@ -427,11 +427,15 @@ def _run_obs_method(
         "target_mode": "obs",
         "obs_source": args.obs_source,
         "x_cols": x_cols,
+        "original_x_cols": estimator_summary.get("original_x_cols"),
+        "effect_x_cols": estimator_summary.get("effect_x_cols"),
+        "excluded_iv_cols": estimator_summary.get("excluded_iv_cols"),
         "ate_hat": ate_hat,
         "rmse": rmse,
         "lambda_opt": None,
         "plugin_name": _normalize_plugin_name(args.plugin),
         "plugin_summary": plugin_summary,
+        "anchor_summary": estimator_summary.get("anchor_summary"),
         "plugin_summary_json": json.dumps(_to_jsonable(plugin_summary), ensure_ascii=False),
         "screening_logs_json": json.dumps(_to_jsonable(screening_logs), ensure_ascii=False),
         "selected_shadow_cols": selected_shadow_cols,

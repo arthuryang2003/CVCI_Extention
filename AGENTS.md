@@ -44,3 +44,45 @@ PR 建议包含：
 
 ## 数据与产物管理
 除非为复现所必需，不要提交体积大且冗余的生成结果。原始输入保留在 `data/`，新增实验输出写入 `experiments/`，并使用包含 seed 信息的可读文件名。
+
+## ACTG/JTPA semi-synthetic stress test 说明
+当前 ACTG/JTPA 支持 `--data-mode real` 和 `--data-mode semi_synthetic`。`real + current` 必须保留原始构造：ACTG 使用 age-driven split，JTPA 使用 site/selection-driven split；real outcome 下没有 individual-level `tau_true`，因此 `proxy_ate` 下的 `rmse/proxy_abs_error` 只能解释为 ATE-level proxy error，不是真 CATE RMSE。
+
+`semi_synthetic` 会保留真实 X/T/G，替换 Y 并生成 `tau_true`，用于 `truth_mode=synthetic_truth` 下计算真正 CATE RMSE。默认 outcome 是线性 clean 构造：
+
+```text
+tau_true = tau0 + tau_scale * x_score
+Y = mu + T * tau_true + noise
+```
+
+这个默认构造对 RHC 很友好，因为 RHC 会先在 OBS 内直接学习 treatment effect；当 OBS 中的 apparent CATE 等于 `tau_true` 且结构近似线性时，RHC 的 direct learner 容易正确指定。为了更充分 stress-test selection correction，新增 OBS-specific treatment bias：
+
+- `--semisynth-bias-mode none`：默认值，保持旧结果不变。
+- `--semisynth-bias-mode obs_treatment_bias`：只对 OBS treated outcome 加线性 bias。
+- `--semisynth-bias-mode nonlinear_obs_treatment_bias`：只对 OBS treated outcome 加更复杂的非线性 bias。
+- `--semisynth-bias-mode localized_obs_treatment_bias`：只在 X score 高分位的 OBS treated 子区域加局部非线性 bias，用于降低 RHC 从 RCT correction 线性外推修正 bias 的能力。
+- `--semisynth-bias-scale`：控制 bias 强度，建议先试 `0.5, 1.0, 1.5`。
+
+对应构造为：
+
+```text
+obs_treatment_bias = (1 - G) * T * bias_scale * bias_score(X)
+Y = mu + T * tau_true + obs_treatment_bias + noise
+```
+
+评估 truth 仍然是 `tau_true`。因此 RHC 在 OBS 内看到的是 `tau_true + bias_scale * bias_score(X)` 这种 apparent CATE，可能把 OBS-specific treatment bias 误学成 treatment effect heterogeneity。这个 stress test 的目的不是人为打压某个方法，而是构造更贴近 nonignorable source selection / treatment-confounding correction 要解决的问题。
+
+组会快速实验脚本：
+
+```bash
+conda run -n CVCI python experiments/meeting_quick_eval.py \
+  --dataset actg \
+  --data-path data/actg.csv \
+  --target-mode obs \
+  --seeds 0 1 2 \
+  --semisynth-bias-mode localized_obs_treatment_bias \
+  --semisynth-bias-scale 1.0 \
+  --output-dir results/meeting_actg_bias
+```
+
+JTPA 同理把 `--dataset jtpa --data-path data/jtpa.csv --output-dir results/meeting_jtpa_bias`。如果打开 bias 后 Ours 仍不优于 Integrative-R/RHC，下一步应做 correction ablation：oracle source propensity、oracle IV/Shadow columns、以及 adaptive correction strength。

@@ -4,12 +4,14 @@ Unified OBS-target estimators with pluggable selection correction.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import copy
+from dataclasses import dataclass, replace
 from typing import Dict, Optional, Sequence
 
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.model_selection import StratifiedKFold
 
 from obs.models import LinearBiasModel, LinearTreatmentEffectModel
 from obs.plugins import SelectionCorrectionPlugin
@@ -19,6 +21,8 @@ _INTEGRATIVE_SHADOW_ERROR = (
     "For integrative and integrative_rlearner, use plugin='shadow_source_ep' because these methods require "
     "extended participation weights to estimate bG."
 )
+
+SOURCE_CORRECTION_GRID = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
 
 
 def _to_1d_float_array(values) -> np.ndarray:
@@ -151,6 +155,40 @@ def _compute_rct_pseudo_effect(
     mu0 = model_c.predict(X)
     p = _safe_clip_prob(np.mean(A))
     pseudo = mu1 - mu0 + A * (Y - mu1) / p - (1.0 - A) * (Y - mu0) / (1.0 - p)
+    return _to_1d_float_array(pseudo)
+
+
+def _compute_rct_pseudo_effect_from_train(
+    df_train: pd.DataFrame,
+    df_val: pd.DataFrame,
+    x_cols: Sequence[str],
+    a_col: str,
+    y_col: str,
+) -> np.ndarray:
+    """
+    Construct validation pseudo effect with outcome nuisances learned on RCT train fold.
+    """
+    X_train = df_train[list(x_cols)].to_numpy(dtype=float)
+    A_train = df_train[a_col].to_numpy(dtype=float)
+    Y_train = df_train[y_col].to_numpy(dtype=float)
+    X_val = df_val[list(x_cols)].to_numpy(dtype=float)
+    A_val = df_val[a_col].to_numpy(dtype=float)
+    Y_val = df_val[y_col].to_numpy(dtype=float)
+
+    treated_idx = A_train == 1
+    control_idx = A_train == 0
+    if treated_idx.sum() == 0 or control_idx.sum() == 0:
+        raise ValueError("RCT train fold must contain both treated and control samples.")
+
+    model_t = LinearRegression()
+    model_c = LinearRegression()
+    model_t.fit(X_train[treated_idx], Y_train[treated_idx])
+    model_c.fit(X_train[control_idx], Y_train[control_idx])
+
+    mu1 = model_t.predict(X_val)
+    mu0 = model_c.predict(X_val)
+    p = _safe_clip_prob(np.mean(A_train))
+    pseudo = mu1 - mu0 + A_val * (Y_val - mu1) / p - (1.0 - A_val) * (Y_val - mu0) / (1.0 - p)
     return _to_1d_float_array(pseudo)
 
 
@@ -387,6 +425,9 @@ class IntegrativeObsEstimator:
     plugin: Optional[SelectionCorrectionPlugin] = None
     model_type: str = "linear"
     random_state: int = 2024
+    source_correction_cv: bool = False
+    source_correction_cv_folds: int = 5
+    source_correction_strength: float = 1.0
 
     def __post_init__(self):
         if self.model_type != "linear":
@@ -419,6 +460,108 @@ class IntegrativeObsEstimator:
     ):
         self._validate_plugin()
         x_cols = list(x_cols)
+        self.source_correction_grid_ = [float(gamma) for gamma in SOURCE_CORRECTION_GRID]
+        self.source_correction_cv_results_ = []
+        if self.source_correction_cv:
+            selected_gamma, cv_results = self._select_source_correction_strength(
+                df_rct=df_rct,
+                df_obs=df_obs,
+                x_cols=x_cols,
+                a_col=a_col,
+                y_col=y_col,
+                g_col=g_col,
+            )
+            self.source_correction_cv_results_ = cv_results
+        else:
+            selected_gamma = float(self.source_correction_strength)
+        self.selected_source_correction_strength_ = float(selected_gamma)
+        return self._fit_with_source_correction_strength(
+            df_rct=df_rct,
+            df_obs=df_obs,
+            x_cols=x_cols,
+            a_col=a_col,
+            y_col=y_col,
+            g_col=g_col,
+            gamma=self.selected_source_correction_strength_,
+        )
+
+    def _select_source_correction_strength(
+        self,
+        df_rct: pd.DataFrame,
+        df_obs: pd.DataFrame,
+        x_cols: Sequence[str],
+        a_col: str,
+        y_col: str,
+        g_col: str,
+    ):
+        treatment = df_rct[a_col].to_numpy(dtype=float)
+        _, class_counts = np.unique(treatment, return_counts=True)
+        if class_counts.size < 2:
+            raise ValueError("source_correction_cv requires RCT data with both treatment arms.")
+        requested_folds = int(self.source_correction_cv_folds)
+        effective_folds = min(requested_folds, int(np.min(class_counts)))
+        if effective_folds < 2:
+            raise ValueError("source_correction_cv requires at least two samples in each RCT treatment arm.")
+
+        splitter = StratifiedKFold(
+            n_splits=effective_folds,
+            shuffle=True,
+            random_state=int(self.random_state),
+        )
+        cv_results = []
+        for gamma in self.source_correction_grid_:
+            fold_mse = []
+            for train_idx, val_idx in splitter.split(df_rct, treatment):
+                df_rct_train = df_rct.iloc[train_idx].copy()
+                df_rct_val = df_rct.iloc[val_idx].copy()
+                temp = replace(
+                    self,
+                    plugin=copy.deepcopy(self.plugin),
+                    source_correction_cv=False,
+                    source_correction_cv_folds=effective_folds,
+                    source_correction_strength=float(gamma),
+                )
+                temp.fit(df_rct=df_rct_train, df_obs=df_obs, x_cols=x_cols, a_col=a_col, y_col=y_col, g_col=g_col)
+
+                pseudo_val = _compute_rct_pseudo_effect_from_train(
+                    df_train=df_rct_train,
+                    df_val=df_rct_val,
+                    x_cols=temp.effect_x_cols_,
+                    a_col=a_col,
+                    y_col=y_col,
+                )
+                X_val = df_rct_val[x_cols]
+                tau_hat_val = temp.predict_tau(X_val) + float(gamma) * temp.predict_bG(X_val)
+                mse = float(np.mean((_to_1d_float_array(tau_hat_val) - pseudo_val) ** 2))
+                fold_mse.append(mse)
+
+            cv_results.append(
+                {
+                    "gamma": float(gamma),
+                    "mean_mse": float(np.mean(fold_mse)),
+                    "std_mse": float(np.std(fold_mse)),
+                    "fold_mse": [float(v) for v in fold_mse],
+                    "requested_folds": requested_folds,
+                    "effective_folds": effective_folds,
+                }
+            )
+
+        best = min(cv_results, key=lambda item: (item["mean_mse"], item["gamma"]))
+        return float(best["gamma"]), cv_results
+
+    def _fit_with_source_correction_strength(
+        self,
+        df_rct: pd.DataFrame,
+        df_obs: pd.DataFrame,
+        x_cols: Sequence[str],
+        a_col: str,
+        y_col: str,
+        g_col: str,
+        gamma: float,
+    ):
+        gamma = float(gamma)
+        if not np.isfinite(gamma):
+            raise ValueError("source correction strength must be finite.")
 
         df_all = pd.concat([df_rct, df_obs], ignore_index=True)
         T_all = _to_1d_float_array(df_all[a_col])
@@ -462,7 +605,7 @@ class IntegrativeObsEstimator:
         r_y = Y_all - mu_hat
         r_t = T_all - e_hat
         bG_hat = _to_1d_float_array(self.anchor_.predict_bG(X_effect_all))
-        target = r_y - r_t * G_all * bG_hat
+        target = r_y - gamma * r_t * G_all * bG_hat
 
         Phi = _basis_with_intercept(X_effect_all)
         design_tau = r_t[:, None] * Phi
@@ -495,6 +638,10 @@ class IntegrativeObsEstimator:
             "original_x_cols": self.x_cols_,
             "effect_x_cols": self.effect_x_cols_,
             "excluded_iv_cols": self.excluded_iv_cols_,
+            "source_correction_cv": bool(self.source_correction_cv),
+            "source_correction_grid": self.source_correction_grid_,
+            "selected_source_correction_strength": float(self.selected_source_correction_strength_),
+            "source_correction_cv_results": self.source_correction_cv_results_,
             "tau0_mean": float(np.mean(tau0_obs)),
             "bG_mean": float(np.mean(bG_obs)),
             "bT_mean": float(np.mean(bT_obs)),
@@ -559,7 +706,7 @@ class IntegrativeObsEstimator:
         return self.anchor_.predict_bG(X_effect)
 
     def predict_tau_r(self, X) -> np.ndarray:
-        return self.predict_tau(X) + self.predict_bG(X)
+        return self.predict_tau(X) + self.selected_source_correction_strength_ * self.predict_bG(X)
 
     def predict_obs_biased_tau(self, X) -> np.ndarray:
         return self.predict_tau(X) + self.predict_bT(X)

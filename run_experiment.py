@@ -21,7 +21,12 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--data-path", type=str, default=None)
     parser.add_argument("--target-mode", type=str, required=True, choices=["rct", "obs"])
     parser.add_argument("--method", type=str, required=True, choices=["cvci", "rhc", "integrative", "integrative_rlearner"])
-    parser.add_argument("--plugin", type=str, default="none", choices=["none", "shadow", "shadow_source_ep", "iv", "ipsw", "cw"])
+    parser.add_argument(
+        "--plugin",
+        type=str,
+        default="none",
+        choices=["none", "shadow", "shadow_source_ep", "iv", "ipsw", "cw", "oracle_source"],
+    )
 
     parser.add_argument("--obs-source", type=str, default="cps", choices=["cps", "psid"])
     parser.add_argument("--x-cols", nargs="*", default=None)
@@ -30,10 +35,36 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--truth-value", type=float, default=None)
     parser.add_argument("--lalonde-path", type=str, default="lalonde.csv")
     parser.add_argument("--data-mode", type=str, default="real", choices=["real", "semi_synthetic"])
-    parser.add_argument("--semisynth-effect-mode", type=str, default="constant", choices=["constant", "linear"])
+    parser.add_argument(
+        "--construction-mode",
+        type=str,
+        default="current",
+        choices=["current", "y_dependent_source", "tau_dependent_source"],
+    )
+    parser.add_argument("--semisynth-effect-mode", type=str, default="linear", choices=["constant", "linear", "nonlinear"])
     parser.add_argument("--semisynth-truth-source", type=str, default="rct", choices=["rct", "pooled"])
     parser.add_argument("--semisynth-noise-mode", type=str, default="groupwise", choices=["shared", "groupwise"])
+    parser.add_argument("--semisynth-tau0", type=float, default=1.0)
+    parser.add_argument("--semisynth-tau-scale", type=float, default=0.5)
+    parser.add_argument("--semisynth-mu0", type=float, default=0.0)
+    parser.add_argument("--semisynth-mu-scale", type=float, default=1.0)
+    parser.add_argument("--semisynth-g-shift", type=float, default=0.2)
+    parser.add_argument("--semisynth-noise-std", type=float, default=1.0)
+    parser.add_argument(
+        "--semisynth-bias-mode",
+        type=str,
+        default="none",
+        choices=["none", "obs_treatment_bias", "nonlinear_obs_treatment_bias", "localized_obs_treatment_bias"],
+    )
+    parser.add_argument("--semisynth-bias-scale", type=float, default=0.0)
     parser.add_argument("--semisynth-seed", type=int, default=2024)
+    parser.add_argument("--source-alpha-x", type=float, default=0.5)
+    parser.add_argument("--source-alpha-t", type=float, default=0.2)
+    parser.add_argument("--source-alpha-y", type=float, default=1.0)
+    parser.add_argument("--source-alpha-tau", type=float, default=1.0)
+    parser.add_argument("--source-rct-frac", type=float, default=0.3)
+    parser.add_argument("--correction-strength", type=float, default=1.0)
+    parser.add_argument("--source-correction-cv", action="store_true")
 
     parser.add_argument("--lambda-bin", type=int, default=5)
     parser.add_argument("--k-fold", type=int, default=5)
@@ -112,6 +143,70 @@ def _weight_summary(weights: np.ndarray) -> Dict[str, float]:
         "max": float(np.max(arr)),
         "std": float(np.std(arr)),
     }
+
+
+class WeightShrinkagePlugin(SelectionCorrectionPlugin):
+    def __init__(self, base_plugin: SelectionCorrectionPlugin, strength: float):
+        super().__init__(name=base_plugin.name)
+        self.base_plugin = base_plugin
+        self.strength = float(strength)
+
+    def fit(self, df_rct, df_obs, x_cols, a_col, y_col, g_col):
+        self.base_plugin.fit(df_rct=df_rct, df_obs=df_obs, x_cols=x_cols, a_col=a_col, y_col=y_col, g_col=g_col)
+        self.fitted_ = True
+        return self
+
+    def get_rct_weights(self, df_rct: pd.DataFrame) -> Optional[np.ndarray]:
+        weights = self.base_plugin.get_rct_weights(df_rct)
+        if weights is None:
+            return None
+        arr = np.asarray(weights, dtype=float).reshape(-1)
+        shrunk = 1.0 + self.strength * (arr - 1.0)
+        return np.clip(shrunk, 1e-8, None)
+
+    def get_corrected_bias_target(self, df_rct: pd.DataFrame, base_w_hat: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
+        return self.base_plugin.get_corrected_bias_target(df_rct=df_rct, base_w_hat=base_w_hat)
+
+    def summary(self) -> Dict[str, object]:
+        summary = dict(self.base_plugin.summary())
+        weights = getattr(self.base_plugin, "weights_", None)
+        shrunk = self.get_rct_weights(pd.DataFrame(index=range(len(weights)))) if weights is not None else None
+        summary["correction_strength"] = float(self.strength)
+        summary["weight_shrinkage"] = "w_gamma=1+gamma*(w-1)"
+        if shrunk is not None:
+            summary["shrunk_weight_summary"] = _weight_summary(shrunk)
+        return summary
+
+
+class OracleSourcePlugin(SelectionCorrectionPlugin):
+    def __init__(self, clip_min: float = 0.05, clip_max: float = 20.0):
+        super().__init__(name="oracle_source")
+        self.clip_min = float(clip_min)
+        self.clip_max = float(clip_max)
+
+    def fit(self, df_rct, df_obs, x_cols, a_col, y_col, g_col):
+        _ = df_obs, x_cols, a_col, y_col, g_col
+        if "source_prob_true" not in df_rct.columns:
+            raise ValueError("oracle_source requires source_prob_true; use y/tau-dependent semi_synthetic construction.")
+        p = np.asarray(df_rct["source_prob_true"], dtype=float).reshape(-1)
+        p = np.clip(p, self.clip_min, 1.0 - self.clip_min)
+        weights = (1.0 - p) / p
+        weights = np.clip(weights, self.clip_min, self.clip_max)
+        weights = weights / max(float(np.mean(weights)), 1e-12)
+        self.weights_ = weights
+        self.fitted_ = True
+        self.diagnostics_ = {
+            "plugin": self.name,
+            "weight_summary": _weight_summary(weights),
+            "oracle_source_prob_min": float(np.min(p)),
+            "oracle_source_prob_mean": float(np.mean(p)),
+            "oracle_source_prob_max": float(np.max(p)),
+        }
+        return self
+
+    def get_rct_weights(self, df_rct: pd.DataFrame) -> Optional[np.ndarray]:
+        _ = df_rct
+        return self.weights_ if self.fitted_ else None
 
 
 def _to_jsonable(value: Any) -> Any:
@@ -206,13 +301,15 @@ def _build_rhc_plugin(
     shadow_relevance_group: Optional[str],
 ) -> SelectionCorrectionPlugin:
     if args.plugin == "none":
-        return SelectionCorrectionPlugin(name="none")
-    if args.plugin == "ipsw":
-        return IPSWPlugin(clip_min=args.ipsw_clip_min, clip_max=args.ipsw_clip_max)
-    if args.plugin == "cw":
-        return CWPlugin(degree=args.cw_degree, include_interactions=args.cw_interactions, max_iter=args.cw_max_iter)
-    if args.plugin == "iv":
-        return SelectionIVPlugin(
+        plugin = SelectionCorrectionPlugin(name="none")
+    elif args.plugin == "oracle_source":
+        plugin = OracleSourcePlugin(clip_min=args.iv_clip_min, clip_max=args.iv_clip_max)
+    elif args.plugin == "ipsw":
+        plugin = IPSWPlugin(clip_min=args.ipsw_clip_min, clip_max=args.ipsw_clip_max)
+    elif args.plugin == "cw":
+        plugin = CWPlugin(degree=args.cw_degree, include_interactions=args.cw_interactions, max_iter=args.cw_max_iter)
+    elif args.plugin == "iv":
+        plugin = SelectionIVPlugin(
             iv_candidate_cols=list(x_cols),
             relevance_threshold=args.iv_relevance_threshold,
             exclusion_threshold=args.iv_exclusion_threshold,
@@ -223,13 +320,13 @@ def _build_rhc_plugin(
             force_candidate_cols=args.force_candidate_cols,
             verbose=False,
         )
-    if args.plugin == "shadow":
+    elif args.plugin == "shadow":
         if shadow_direction != "rct_to_obs":
             raise ValueError(
                 "OBS-target RHC shadow plugin uses rct_to_obs direction. "
                 f"Received shadow_direction={shadow_direction}."
             )
-        return ShadowPlugin(
+        plugin = ShadowPlugin(
             association_threshold=args.shadow_association_threshold,
             residual_independence_threshold=args.shadow_residual_independence_threshold,
             shadow_mc_samples=args.shadow_mc_samples,
@@ -241,13 +338,13 @@ def _build_rhc_plugin(
             force_candidate_cols=args.force_candidate_cols,
             verbose=False,
         )
-    if args.plugin == "shadow_source_ep":
+    elif args.plugin == "shadow_source_ep":
         if shadow_direction != "rct_to_obs":
             raise ValueError(
                 "OBS-target RHC shadow_source_ep plugin uses rct_to_obs direction. "
                 f"Received shadow_direction={shadow_direction}."
             )
-        return ShadowSourceEPPlugin(
+        plugin = ShadowSourceEPPlugin(
             association_threshold=args.shadow_association_threshold,
             residual_independence_threshold=args.shadow_residual_independence_threshold,
             clip_min=args.shadow_source_ep_clip,
@@ -260,7 +357,12 @@ def _build_rhc_plugin(
             force_candidate_cols=args.force_candidate_cols,
             verbose=False,
         )
-    raise ValueError(f"Unsupported plugin for RHC: {args.plugin}")
+    else:
+        raise ValueError(f"Unsupported plugin for RHC: {args.plugin}")
+
+    if args.correction_strength != 1.0 and args.plugin != "none":
+        plugin = WeightShrinkagePlugin(plugin, strength=args.correction_strength)
+    return plugin
 
 
 def _run_cvci(
@@ -387,13 +489,32 @@ def _run_obs_method(
     resolved_shadow_direction = _resolve_shadow_direction(args.shadow_direction, target_mode="obs")
     shadow_relevance_group = _normalize_shadow_relevance_group(args.shadow_relevance_group)
     plugin = _build_rhc_plugin(args, x_cols=x_cols, shadow_direction=resolved_shadow_direction, shadow_relevance_group=shadow_relevance_group)
+    source_correction_cv = bool(args.source_correction_cv)
+    source_correction_cv_plugins = {"iv", "shadow_source_ep"}
+    if source_correction_cv and args.plugin not in source_correction_cv_plugins:
+        raise ValueError(
+            "--source-correction-cv is only available for modified plugin-corrected integrative methods; "
+            "base integrative/integrative_rlearner and other baseline plugins must not use gamma CV."
+        )
 
     if args.method == "rhc":
         estimator = RHCObsEstimator(plugin=plugin, model_type="linear", random_state=args.seed)
     elif args.method == "integrative":
-        estimator = IntegrativeObsEstimator(plugin=plugin, model_type="linear", random_state=args.seed)
+        estimator = IntegrativeObsEstimator(
+            plugin=plugin,
+            model_type="linear",
+            random_state=args.seed,
+            source_correction_cv=source_correction_cv,
+            source_correction_cv_folds=args.k_fold,
+        )
     elif args.method == "integrative_rlearner":
-        estimator = IntegrativeRLearnerObsEstimator(plugin=plugin, model_type="linear", random_state=args.seed)
+        estimator = IntegrativeRLearnerObsEstimator(
+            plugin=plugin,
+            model_type="linear",
+            random_state=args.seed,
+            source_correction_cv=source_correction_cv,
+            source_correction_cv_folds=args.k_fold,
+        )
     else:
         raise ValueError(f"Unsupported OBS-target method: {args.method}")
     estimator.fit(df_rct=df_rct, df_obs=df_obs, x_cols=x_cols, a_col="T", y_col="Y", g_col="G")
@@ -430,6 +551,10 @@ def _run_obs_method(
         "original_x_cols": estimator_summary.get("original_x_cols"),
         "effect_x_cols": estimator_summary.get("effect_x_cols"),
         "excluded_iv_cols": estimator_summary.get("excluded_iv_cols"),
+        "source_correction_cv": estimator_summary.get("source_correction_cv"),
+        "source_correction_grid": estimator_summary.get("source_correction_grid"),
+        "selected_source_correction_strength": estimator_summary.get("selected_source_correction_strength"),
+        "source_correction_cv_results": estimator_summary.get("source_correction_cv_results"),
         "ate_hat": ate_hat,
         "rmse": rmse,
         "lambda_opt": None,
@@ -495,14 +620,32 @@ def _save_outputs(result: Dict[str, object], output_json: Optional[str], output_
 
 def run_experiment(args: argparse.Namespace) -> Dict[str, object]:
     np.random.seed(args.seed)
+    if args.construction_mode == "tau_dependent_source" and args.data_mode != "semi_synthetic":
+        raise ValueError("tau_dependent_source requires --data-mode semi_synthetic.")
+
     semisynth_config = None
     if args.data_mode == "semi_synthetic":
         semisynth_config = {
             "effect_mode": str(args.semisynth_effect_mode),
             "truth_source": str(args.semisynth_truth_source),
             "noise_mode": str(args.semisynth_noise_mode),
+            "tau0": float(args.semisynth_tau0),
+            "tau_scale": float(args.semisynth_tau_scale),
+            "mu0": float(args.semisynth_mu0),
+            "mu_scale": float(args.semisynth_mu_scale),
+            "g_shift": float(args.semisynth_g_shift),
+            "noise_std": float(args.semisynth_noise_std),
+            "bias_mode": str(args.semisynth_bias_mode),
+            "bias_scale": float(args.semisynth_bias_scale),
             "seed": int(args.semisynth_seed),
         }
+    source_config = {
+        "source_alpha_x": float(args.source_alpha_x),
+        "source_alpha_t": float(args.source_alpha_t),
+        "source_alpha_y": float(args.source_alpha_y),
+        "source_alpha_tau": float(args.source_alpha_tau),
+        "source_rct_frac": float(args.source_rct_frac),
+    }
 
     args.truth_mode = _resolve_truth_mode(args.truth_mode, data_mode=args.data_mode)
 
@@ -525,6 +668,8 @@ def run_experiment(args: argparse.Namespace) -> Dict[str, object]:
         lalonde_path=args.lalonde_path,
         data_mode=args.data_mode,
         semisynth_config=semisynth_config,
+        construction_mode=args.construction_mode,
+        source_config=source_config,
         treatment_col=args.treatment_col,
         outcome_col=args.outcome_col,
         site_col=args.site_col,
@@ -544,7 +689,14 @@ def run_experiment(args: argparse.Namespace) -> Dict[str, object]:
     result["dataset"] = args.dataset
     result["data_path"] = effective_data_path
     result["data_mode"] = args.data_mode
+    result["construction_mode"] = args.construction_mode
     result["semisynth_config"] = semisynth_config
+    result["source_config"] = source_config
+    result["source_alpha_y"] = float(args.source_alpha_y)
+    result["source_alpha_tau"] = float(args.source_alpha_tau)
+    result["actual_rct_frac"] = split_summary.get("actual_rct_frac")
+    result["corr_G_Y"] = split_summary.get("corr_G_Y")
+    result["corr_G_tau_true"] = split_summary.get("corr_G_tau_true")
     result["target_true_ate"] = target_true_ate
     result["rct_true_ate"] = rct_true_ate
     result["obs_true_ate"] = obs_true_ate

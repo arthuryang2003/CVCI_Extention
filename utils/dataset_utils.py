@@ -10,6 +10,11 @@ import pandas as pd
 from utils.lalonde_utils import load_lalonde_split
 
 
+def _sigmoid(x: np.ndarray) -> np.ndarray:
+    x = np.asarray(x, dtype=float)
+    return 1.0 / (1.0 + np.exp(-np.clip(x, -35.0, 35.0)))
+
+
 def _find_first_existing_col(df: pd.DataFrame, candidates: Sequence[str], field_name: str) -> str:
     cols = {str(c).lower(): str(c) for c in df.columns}
     for cand in candidates:
@@ -45,10 +50,20 @@ def _is_excluded_covariate(col: str, treatment_col: str, outcome_col: str, site_
     explicit = {
         str(treatment_col).lower(),
         str(outcome_col).lower(),
+        "a",
         "t",
+        "trt",
+        "treat",
+        "treated",
+        "treatment",
+        "assigned",
+        "program",
         "y",
+        "outcome",
+        "label",
         "g",
         "source",
+        "selection",
         "group",
         "site",
         "site_name",
@@ -73,6 +88,202 @@ def _validate_treatment_arms(df: pd.DataFrame, frame_name: str) -> None:
             f"{frame_name} must contain both treated and control groups after preprocessing. "
             f"treated={n_t}, control={n_c}."
         )
+
+
+def _standardized_x_score(df: pd.DataFrame, x_cols: Sequence[str]) -> np.ndarray:
+    if not x_cols:
+        return np.zeros(df.shape[0], dtype=float)
+    use_cols = list(x_cols)[: min(5, len(x_cols))]
+    X = df[use_cols].to_numpy(dtype=float)
+    mean = np.nanmean(X, axis=0)
+    std = np.nanstd(X, axis=0)
+    std = np.where(std > 1e-12, std, 1.0)
+    X_std = (X - mean) / std
+    return np.nan_to_num(X_std, nan=0.0).mean(axis=1)
+
+
+def _standardized_x_matrix(df: pd.DataFrame, x_cols: Sequence[str], max_cols: int = 6) -> np.ndarray:
+    if not x_cols:
+        return np.zeros((df.shape[0], 0), dtype=float)
+    use_cols = list(x_cols)[: min(max_cols, len(x_cols))]
+    X = df[use_cols].to_numpy(dtype=float)
+    mean = np.nanmean(X, axis=0)
+    std = np.nanstd(X, axis=0)
+    std = np.where(std > 1e-12, std, 1.0)
+    return np.nan_to_num((X - mean) / std, nan=0.0)
+
+
+def _standardize_vector(values: np.ndarray) -> np.ndarray:
+    arr = np.asarray(values, dtype=float).reshape(-1)
+    sd = float(np.nanstd(arr))
+    if sd <= 1e-12:
+        return np.zeros_like(arr, dtype=float)
+    return np.nan_to_num((arr - float(np.nanmean(arr))) / sd, nan=0.0)
+
+
+def _semisynth_bias_score(df: pd.DataFrame, x_cols: Sequence[str], mode: str) -> np.ndarray:
+    if not x_cols:
+        return np.zeros(df.shape[0], dtype=float)
+    mode = str(mode).lower()
+    use_cols = list(x_cols)[: min(5, len(x_cols))]
+    X = df[use_cols].to_numpy(dtype=float)
+    mean = np.nanmean(X, axis=0)
+    std = np.nanstd(X, axis=0)
+    std = np.where(std > 1e-12, std, 1.0)
+    X_std = np.nan_to_num((X - mean) / std, nan=0.0)
+
+    score = X_std[:, 0].copy()
+    if X_std.shape[1] >= 2:
+        score = score + 0.5 * X_std[:, 1]
+    if X_std.shape[1] >= 3:
+        score = score - 0.4 * X_std[:, 2]
+    if mode in {"nonlinear_obs_treatment_bias", "localized_obs_treatment_bias"} and X_std.shape[1] >= 2:
+        score = score + 0.5 * (X_std[:, 1] ** 2 - 1.0)
+    if mode in {"nonlinear_obs_treatment_bias", "localized_obs_treatment_bias"} and X_std.shape[1] >= 4:
+        score = score - 0.5 * X_std[:, 2] * X_std[:, 3]
+    if mode in {"nonlinear_obs_treatment_bias", "localized_obs_treatment_bias"} and X_std.shape[1] >= 5:
+        score = score + 0.3 * (X_std[:, 4] > 0.0).astype(float)
+    if mode == "localized_obs_treatment_bias":
+        x_score = X_std[:, : min(3, X_std.shape[1])].mean(axis=1)
+        cutoff = float(np.nanquantile(x_score, 0.65))
+        local_gate = (x_score > cutoff).astype(float)
+        score = local_gate * (1.0 + np.maximum(score, 0.0))
+    return _standardize_vector(score)
+
+
+def _auto_intercept_score(score: np.ndarray, target_frac: float) -> float:
+    target = float(np.clip(target_frac, 1e-4, 1.0 - 1e-4))
+    lo, hi = -50.0, 50.0
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        mean_p = float(_sigmoid(mid + score).mean())
+        if mean_p < target:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def _valid_source_split(df: pd.DataFrame) -> bool:
+    if int((df["G"] == 1).sum()) == 0 or int((df["G"] == 0).sum()) == 0:
+        return False
+    for g in (0.0, 1.0):
+        part = df[df["G"] == g]
+        if int((part["T"] == 1).sum()) == 0 or int((part["T"] == 0).sum()) == 0:
+            return False
+    return True
+
+
+def _corr_or_none(a: np.ndarray, b: np.ndarray) -> Optional[float]:
+    aa = np.asarray(a, dtype=float).reshape(-1)
+    bb = np.asarray(b, dtype=float).reshape(-1)
+    if aa.shape[0] < 2 or float(np.nanstd(aa)) <= 1e-12 or float(np.nanstd(bb)) <= 1e-12:
+        return None
+    return float(np.corrcoef(aa, bb)[0, 1])
+
+
+def _apply_semisynthetic_outcome(
+    df_all: pd.DataFrame,
+    x_cols: Sequence[str],
+    config: Optional[dict],
+) -> pd.DataFrame:
+    cfg = dict(config or {})
+    rng = np.random.default_rng(int(cfg.get("seed", 2024)))
+    out = df_all.copy()
+    x_score = _standardized_x_score(out, x_cols)
+    tau0 = float(cfg.get("tau0", 1.0))
+    tau_scale = float(cfg.get("tau_scale", 0.5))
+    mu0 = float(cfg.get("mu0", 0.0))
+    mu_scale = float(cfg.get("mu_scale", 1.0))
+    g_shift = float(cfg.get("g_shift", 0.2))
+    noise_std = float(cfg.get("noise_std", 1.0))
+    bias_mode = str(cfg.get("bias_mode", "none")).lower()
+    bias_scale = float(cfg.get("bias_scale", 0.0))
+    effect_mode = str(cfg.get("effect_mode", "linear")).lower()
+    if effect_mode == "constant":
+        out["tau_true"] = tau0
+    elif effect_mode == "linear":
+        out["tau_true"] = tau0 + tau_scale * x_score
+    elif effect_mode == "nonlinear":
+        X_std = _standardized_x_matrix(out, x_cols, max_cols=6)
+        nonlinear_score = x_score.copy()
+        if X_std.shape[1] >= 2:
+            nonlinear_score = nonlinear_score + 0.45 * np.sin(X_std[:, 0]) - 0.35 * (X_std[:, 1] ** 2 - 1.0)
+        if X_std.shape[1] >= 4:
+            nonlinear_score = nonlinear_score + 0.35 * X_std[:, 2] * X_std[:, 3]
+        if X_std.shape[1] >= 6:
+            local_gate = (X_std[:, 4] > np.nanquantile(X_std[:, 4], 0.6)).astype(float)
+            nonlinear_score = nonlinear_score + local_gate * (0.5 + 0.25 * np.maximum(X_std[:, 5], 0.0))
+        out["tau_true"] = tau0 + tau_scale * _standardize_vector(nonlinear_score)
+    else:
+        raise ValueError(f"semisynth effect_mode must be one of ['constant', 'linear', 'nonlinear'], got {effect_mode}")
+    if effect_mode == "nonlinear":
+        X_std = _standardized_x_matrix(out, x_cols, max_cols=6)
+        mu_score = x_score.copy()
+        if X_std.shape[1] >= 3:
+            mu_score = mu_score + 0.35 * np.sin(X_std[:, 1]) + 0.25 * (X_std[:, 2] ** 2 - 1.0)
+        if X_std.shape[1] >= 5:
+            mu_score = mu_score - 0.25 * X_std[:, 3] * X_std[:, 4]
+        mu_score = _standardize_vector(mu_score)
+    else:
+        mu_score = x_score
+    mu = mu0 + mu_scale * mu_score + g_shift * out["G"].to_numpy(dtype=float)
+    obs_treatment_bias = np.zeros(out.shape[0], dtype=float)
+    if bias_mode != "none" and abs(bias_scale) > 0.0:
+        if bias_mode not in {"obs_treatment_bias", "nonlinear_obs_treatment_bias", "localized_obs_treatment_bias"}:
+            raise ValueError(
+                "semisynth bias_mode must be one of ['none', 'obs_treatment_bias', "
+                f"'nonlinear_obs_treatment_bias', 'localized_obs_treatment_bias'], got {bias_mode}"
+            )
+        bias_score = _semisynth_bias_score(out, x_cols, mode=bias_mode)
+        obs_mask = 1.0 - out["G"].to_numpy(dtype=float)
+        obs_treatment_bias = obs_mask * out["T"].to_numpy(dtype=float) * bias_scale * bias_score
+        out["semisynth_bias_score"] = bias_score
+    out["obs_treatment_bias"] = obs_treatment_bias
+    out["Y"] = mu + out["T"].to_numpy(dtype=float) * out["tau_true"].to_numpy(dtype=float) + obs_treatment_bias
+    out["Y"] = out["Y"] + rng.normal(0.0, noise_std, size=out.shape[0])
+    return out
+
+
+def _reconstruct_source(
+    df_all: pd.DataFrame,
+    x_cols: Sequence[str],
+    construction_mode: str,
+    config: Optional[dict],
+    seed: int,
+) -> pd.DataFrame:
+    cfg = dict(config or {})
+    mode = str(construction_mode)
+    out = df_all.copy()
+    x_score = _standardized_x_score(out, x_cols)
+    t = out["T"].to_numpy(dtype=float)
+    alpha_x = float(cfg.get("source_alpha_x", 0.5))
+    alpha_t = float(cfg.get("source_alpha_t", 0.2))
+    source_rct_frac = float(cfg.get("source_rct_frac", 0.3))
+    score = alpha_x * x_score + alpha_t * t
+    if mode == "y_dependent_source":
+        score = score + float(cfg.get("source_alpha_y", 1.0)) * _standardize_vector(out["Y"].to_numpy(dtype=float))
+    elif mode == "tau_dependent_source":
+        if "tau_true" not in out.columns:
+            raise ValueError("tau_dependent_source requires --data-mode semi_synthetic.")
+        score = score + float(cfg.get("source_alpha_tau", 1.0)) * _standardize_vector(out["tau_true"].to_numpy(dtype=float))
+    else:
+        raise ValueError(f"Unsupported construction_mode: {construction_mode}")
+
+    c0 = _auto_intercept_score(score, source_rct_frac)
+    p = _sigmoid(c0 + score)
+    for attempt in range(20):
+        rng = np.random.default_rng(int(seed) + 1009 * attempt)
+        candidate = out.copy()
+        candidate["G"] = (rng.uniform(size=candidate.shape[0]) < p).astype(float)
+        candidate["source_score_true"] = c0 + score
+        candidate["source_prob_true"] = p
+        if _valid_source_split(candidate):
+            return candidate
+    raise ValueError(
+        f"Failed to construct valid {construction_mode} split after 20 retries. "
+        "Both RCT/OBS must contain treated and control samples."
+    )
 
 
 def _load_metadata_for_sim_dataset(data_path: str) -> Dict[str, object]:
@@ -243,6 +454,8 @@ def load_dataset_split(
     lalonde_path: str = "lalonde.csv",
     data_mode: str = "real",
     semisynth_config: Optional[dict] = None,
+    construction_mode: str = "current",
+    source_config: Optional[dict] = None,
     treatment_col: Optional[str] = None,
     outcome_col: Optional[str] = None,
     site_col: Optional[str] = None,
@@ -250,10 +463,19 @@ def load_dataset_split(
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, object]]:
     dataset = str(dataset).lower()
     target_mode = str(target_mode).lower()
+    data_mode = str(data_mode).lower()
+    construction_mode = str(construction_mode).lower()
     warnings: List[str] = []
 
     if target_mode not in {"rct", "obs"}:
         raise ValueError(f"target_mode must be one of ['rct', 'obs'], got {target_mode}")
+    if construction_mode not in {"current", "y_dependent_source", "tau_dependent_source"}:
+        raise ValueError(
+            "construction_mode must be one of ['current', 'y_dependent_source', 'tau_dependent_source'], "
+            f"got {construction_mode}"
+        )
+    if construction_mode == "tau_dependent_source" and data_mode != "semi_synthetic":
+        raise ValueError("tau_dependent_source requires --data-mode semi_synthetic.")
 
     if dataset == "lalonde":
         df_rct, df_obs, summary = load_lalonde_split(
@@ -299,7 +521,7 @@ def load_dataset_split(
         )
         y_col = outcome_col or _find_first_existing_col(
             raw_df,
-            ["Y", "outcome", "cd4", "cd40", "cd4_post", "post_cd4", "posttreatment_cd4", "cd4_posttreatment"],
+            ["Y", "outcome", "label", "cd4", "cd40", "cd4_post", "post_cd4", "posttreatment_cd4", "cd4_posttreatment"],
             "outcome_col",
         )
         age_col = _find_first_existing_col(raw_df, ["age", "Age"], "age_col")
@@ -327,15 +549,21 @@ def load_dataset_split(
         )
         s_col = site_col
         if s_col is None:
-            s_col = _find_first_existing_col(raw_df, ["site", "site_name", "center", "location"], "site_col")
+            s_col = _find_first_existing_col(raw_df, ["site", "site_name", "center", "location", "selection"], "site_col")
 
         site_text = raw_df[s_col].astype(str)
         is_rct = site_text.str.contains(str(jtpa_rct_site), case=False, regex=False, na=False)
         if int(is_rct.sum()) == 0:
-            raise ValueError(
-                f"No rows matched jtpa_rct_site='{jtpa_rct_site}' in site_col='{s_col}'. "
-                "Please check --jtpa-rct-site or --site-col."
-            )
+            site_num = pd.to_numeric(raw_df[s_col], errors="coerce")
+            uniq = set(pd.Series(site_num.dropna().unique()).astype(float).tolist())
+            if str(s_col).lower() == "selection" and uniq.issubset({0.0, 1.0}) and len(uniq) == 2:
+                is_rct = site_num == 0
+                warnings.append("JTPA site_col='selection' is binary; using selection=0 as RCT and selection=1 as OBS.")
+            else:
+                raise ValueError(
+                    f"No rows matched jtpa_rct_site='{jtpa_rct_site}' in site_col='{s_col}'. "
+                    "Please check --jtpa-rct-site or --site-col."
+                )
         df_rct_raw = raw_df[is_rct].copy()
         df_obs_raw = raw_df[~is_rct].copy()
 
@@ -377,6 +605,38 @@ def load_dataset_split(
     _validate_treatment_arms(df_rct, "df_rct")
     _validate_treatment_arms(df_obs, "df_obs")
 
+    if data_mode == "semi_synthetic" or construction_mode != "current":
+        df_all = pd.concat([df_rct, df_obs], axis=0, ignore_index=True)
+        if data_mode == "semi_synthetic":
+            df_all = _apply_semisynthetic_outcome(df_all, x_union, semisynth_config)
+        elif data_mode != "real":
+            raise ValueError(f"Unsupported data_mode for {dataset}: {data_mode}")
+        if construction_mode != "current":
+            df_all = _reconstruct_source(
+                df_all=df_all,
+                x_cols=x_union,
+                construction_mode=construction_mode,
+                config=source_config,
+                seed=seed,
+            )
+            if data_mode == "semi_synthetic" and str((semisynth_config or {}).get("bias_mode", "none")).lower() != "none":
+                df_all = _apply_semisynthetic_outcome(df_all, x_union, semisynth_config)
+        keep_cols = [*x_union, "T", "Y", "G"]
+        if "tau_true" in df_all.columns:
+            keep_cols.append("tau_true")
+        if "obs_treatment_bias" in df_all.columns:
+            keep_cols.append("obs_treatment_bias")
+        if "semisynth_bias_score" in df_all.columns:
+            keep_cols.append("semisynth_bias_score")
+        if "source_score_true" in df_all.columns:
+            keep_cols.append("source_score_true")
+        if "source_prob_true" in df_all.columns:
+            keep_cols.append("source_prob_true")
+        df_rct = df_all[df_all["G"] == 1.0][keep_cols].copy()
+        df_obs = df_all[df_all["G"] == 0.0][keep_cols].copy()
+        _validate_treatment_arms(df_rct, "df_rct")
+        _validate_treatment_arms(df_obs, "df_obs")
+
     summary: Dict[str, object] = {
         "dataset": dataset,
         "target_mode": target_mode,
@@ -392,7 +652,26 @@ def load_dataset_split(
         "outcome_col": y_col,
         "site_col": s_col,
         "g_semantics": {"1": "RCT", "0": "OBS"},
+        "data_mode": data_mode,
+        "construction_mode": construction_mode,
+        "actual_rct_frac": float(df_rct.shape[0] / (df_rct.shape[0] + df_obs.shape[0])),
+        "corr_G_Y": _corr_or_none(
+            pd.concat([df_rct["G"], df_obs["G"]], axis=0).to_numpy(dtype=float),
+            pd.concat([df_rct["Y"], df_obs["Y"]], axis=0).to_numpy(dtype=float),
+        ),
+        "corr_G_tau_true": (
+            _corr_or_none(
+                pd.concat([df_rct["G"], df_obs["G"]], axis=0).to_numpy(dtype=float),
+                pd.concat([df_rct["tau_true"], df_obs["tau_true"]], axis=0).to_numpy(dtype=float),
+            )
+            if "tau_true" in df_rct.columns and "tau_true" in df_obs.columns
+            else None
+        ),
     }
+    if semisynth_config is not None:
+        summary["semisynth_config"] = dict(semisynth_config)
+    if source_config is not None:
+        summary["source_config"] = dict(source_config)
     if warnings:
         summary["warnings"] = warnings
 

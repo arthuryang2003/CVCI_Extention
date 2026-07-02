@@ -65,6 +65,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--source-rct-frac", type=float, default=0.3)
     parser.add_argument("--correction-strength", type=float, default=1.0)
     parser.add_argument("--source-correction-cv", action="store_true")
+    parser.add_argument("--rhc-signal-mode", type=str, default="weight", choices=["weight", "regression"])
 
     parser.add_argument("--lambda-bin", type=int, default=5)
     parser.add_argument("--k-fold", type=int, default=5)
@@ -166,6 +167,28 @@ class WeightShrinkagePlugin(SelectionCorrectionPlugin):
 
     def get_corrected_bias_target(self, df_rct: pd.DataFrame, base_w_hat: Optional[np.ndarray] = None) -> Optional[np.ndarray]:
         return self.base_plugin.get_corrected_bias_target(df_rct=df_rct, base_w_hat=base_w_hat)
+
+    def get_regression_recovered_rct_signal(
+        self,
+        df_rct: pd.DataFrame,
+        df_obs: Optional[pd.DataFrame] = None,
+        x_cols: Optional[Sequence[str]] = None,
+        a_col: str = "T",
+        y_col: str = "Y",
+        g_col: str = "G",
+        raw_pseudo_effect: Optional[np.ndarray] = None,
+        base_w_hat: Optional[np.ndarray] = None,
+    ) -> Optional[np.ndarray]:
+        return self.base_plugin.get_regression_recovered_rct_signal(
+            df_rct=df_rct,
+            df_obs=df_obs,
+            x_cols=x_cols,
+            a_col=a_col,
+            y_col=y_col,
+            g_col=g_col,
+            raw_pseudo_effect=raw_pseudo_effect,
+            base_w_hat=base_w_hat,
+        )
 
     def summary(self) -> Dict[str, object]:
         summary = dict(self.base_plugin.summary())
@@ -318,6 +341,7 @@ def _build_rhc_plugin(
             screening_mode=args.screening_mode,
             top_k=args.top_k,
             force_candidate_cols=args.force_candidate_cols,
+            random_state=args.seed,
             verbose=False,
         )
     elif args.plugin == "shadow":
@@ -498,7 +522,12 @@ def _run_obs_method(
         )
 
     if args.method == "rhc":
-        estimator = RHCObsEstimator(plugin=plugin, model_type="linear", random_state=args.seed)
+        estimator = RHCObsEstimator(
+            plugin=plugin,
+            model_type="linear",
+            random_state=args.seed,
+            rct_signal_mode=args.rhc_signal_mode,
+        )
     elif args.method == "integrative":
         estimator = IntegrativeObsEstimator(
             plugin=plugin,
@@ -555,6 +584,13 @@ def _run_obs_method(
         "source_correction_grid": estimator_summary.get("source_correction_grid"),
         "selected_source_correction_strength": estimator_summary.get("selected_source_correction_strength"),
         "source_correction_cv_results": estimator_summary.get("source_correction_cv_results"),
+        "rct_signal_mode": estimator_summary.get("rct_signal_mode"),
+        "raw_pseudo_effect_mean": estimator_summary.get("raw_pseudo_effect_mean"),
+        "raw_pseudo_effect_std": estimator_summary.get("raw_pseudo_effect_std"),
+        "debiased_pseudo_effect_mean": estimator_summary.get("debiased_pseudo_effect_mean"),
+        "debiased_pseudo_effect_std": estimator_summary.get("debiased_pseudo_effect_std"),
+        "bias_target_mean": estimator_summary.get("bias_target_mean"),
+        "bias_target_std": estimator_summary.get("bias_target_std"),
         "ate_hat": ate_hat,
         "rmse": rmse,
         "lambda_opt": None,
@@ -653,10 +689,14 @@ def run_experiment(args: argparse.Namespace) -> Dict[str, object]:
         raise ValueError("For target_mode='rct', method must be 'cvci'.")
     if args.target_mode == "obs" and args.method not in {"rhc", "integrative", "integrative_rlearner"}:
         raise ValueError("For target_mode='obs', method must be one of rhc/integrative/integrative_rlearner.")
+    if args.method != "rhc" and args.rhc_signal_mode != "weight":
+        raise ValueError("--rhc-signal-mode regression is only supported for --method rhc.")
 
     effective_data_path = args.data_path
     if args.dataset == "lalonde":
         effective_data_path = args.lalonde_path
+    elif effective_data_path is None and args.dataset in {"sim_obs_iv", "sim_obs_shadow"}:
+        effective_data_path = f"results/sim_data/{args.dataset}_combined.csv"
 
     df_rct, df_obs, split_summary = load_dataset_split(
         dataset=args.dataset,

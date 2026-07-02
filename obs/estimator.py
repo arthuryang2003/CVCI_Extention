@@ -341,10 +341,13 @@ class RHCObsEstimator:
     plugin: Optional[SelectionCorrectionPlugin] = None
     model_type: str = "linear"
     random_state: int = 2024
+    rct_signal_mode: str = "weight"
 
     def __post_init__(self):
         if self.model_type != "linear":
             raise ValueError("Currently only model_type='linear' is supported.")
+        if self.rct_signal_mode not in {"weight", "regression"}:
+            raise ValueError("rct_signal_mode must be one of {'weight', 'regression'}.")
         self.w_model_ = LinearTreatmentEffectModel(fit_interactions=True)
         self.eta_model_ = LinearBiasModel()
         if self.plugin is None:
@@ -368,19 +371,42 @@ class RHCObsEstimator:
 
         X_rct = df_rct[list(x_cols)].to_numpy(dtype=float)
         w_hat_rct = self.w_model_.predict_tau(X_rct)
-        pseudo_effect_rct = _compute_rct_pseudo_effect(df_rct, x_cols=x_cols, a_col=a_col, y_col=y_col)
-        default_bias_target = pseudo_effect_rct - w_hat_rct
+        raw_pseudo_effect_rct = _compute_rct_pseudo_effect(df_rct, x_cols=x_cols, a_col=a_col, y_col=y_col)
+        default_bias_target = raw_pseudo_effect_rct - w_hat_rct
 
         self.plugin.fit(df_rct=df_rct, df_obs=df_obs, x_cols=x_cols, a_col=a_col, y_col=y_col, g_col=g_col)
-        weights = self.plugin.get_rct_weights(df_rct)
-        corrected_target = self.plugin.get_corrected_bias_target(df_rct, base_w_hat=w_hat_rct)
-        if corrected_target is None:
-            corrected_target = default_bias_target
+        debiased_pseudo_effect = None
+        if self.rct_signal_mode == "weight":
+            eta_sample_weight = self.plugin.get_rct_weights(df_rct)
+            corrected_target = self.plugin.get_corrected_bias_target(df_rct, base_w_hat=w_hat_rct)
+            if corrected_target is None:
+                corrected_target = default_bias_target
+        elif self.rct_signal_mode == "regression":
+            debiased_pseudo_effect = self.plugin.get_regression_recovered_rct_signal(
+                df_rct=df_rct,
+                df_obs=df_obs,
+                x_cols=x_cols,
+                a_col=a_col,
+                y_col=y_col,
+                g_col=g_col,
+                raw_pseudo_effect=raw_pseudo_effect_rct,
+                base_w_hat=w_hat_rct,
+            )
+            if debiased_pseudo_effect is None:
+                raise ValueError(f"Plugin {self.plugin.name} does not support rct_signal_mode='regression'.")
+            debiased_pseudo_effect = _to_1d_float_array(debiased_pseudo_effect)
+            if debiased_pseudo_effect.shape[0] != df_rct.shape[0]:
+                raise ValueError("Plugin returned regression recovered RCT signal with invalid shape.")
+            corrected_target = debiased_pseudo_effect - w_hat_rct
+            eta_sample_weight = None
+        else:
+            raise ValueError(f"Unsupported rct_signal_mode={self.rct_signal_mode}.")
+
         corrected_target = _to_1d_float_array(corrected_target)
         if corrected_target.shape[0] != df_rct.shape[0]:
             raise ValueError("Plugin returned corrected bias target with invalid shape.")
 
-        self.eta_model_.fit(X_rct, corrected_target, sample_weight=weights)
+        self.eta_model_.fit(X_rct, corrected_target, sample_weight=eta_sample_weight)
         self.fitted_ = True
         self.x_cols_ = list(x_cols)
         self.a_col_ = a_col
@@ -391,13 +417,26 @@ class RHCObsEstimator:
         self.eta_train_size_ = int(corrected_target.shape[0])
         self.bias_target_mean_ = float(np.mean(corrected_target))
         self.bias_target_std_ = float(np.std(corrected_target))
+        self.raw_pseudo_effect_mean_ = float(np.mean(raw_pseudo_effect_rct))
+        self.raw_pseudo_effect_std_ = float(np.std(raw_pseudo_effect_rct))
+        self.debiased_pseudo_effect_mean_ = (
+            None if debiased_pseudo_effect is None else float(np.mean(debiased_pseudo_effect))
+        )
+        self.debiased_pseudo_effect_std_ = (
+            None if debiased_pseudo_effect is None else float(np.std(debiased_pseudo_effect))
+        )
 
         self.summary_ = {
             "model_type": self.model_type,
             "plugin": self.plugin.name,
+            "rct_signal_mode": self.rct_signal_mode,
             "rct_size": self.rct_size_,
             "obs_size": self.obs_size_,
             "eta_train_size": self.eta_train_size_,
+            "raw_pseudo_effect_mean": self.raw_pseudo_effect_mean_,
+            "raw_pseudo_effect_std": self.raw_pseudo_effect_std_,
+            "debiased_pseudo_effect_mean": self.debiased_pseudo_effect_mean_,
+            "debiased_pseudo_effect_std": self.debiased_pseudo_effect_std_,
             "bias_target_mean": self.bias_target_mean_,
             "bias_target_std": self.bias_target_std_,
             "w_model": self.w_model_.summary(),

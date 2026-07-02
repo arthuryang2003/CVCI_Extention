@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 from scipy.special import expit
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -272,6 +272,58 @@ class SelectionBiasModel:
         return _to_1d_float(self.intercept_ + x_mat @ self.coef_)
 
 
+@dataclass
+class ConditionalGaussianModel:
+    """Continuous-Y conditional model: linear mean plus homoskedastic Gaussian residual."""
+
+    feature_cols: List[str]
+    mean_model: LinearRegression
+    residual_sigma: float
+
+    def predict_mean(self, x: ArrayLike) -> np.ndarray:
+        return self.mean_model.predict(_to_2d_float(x))
+
+    def sample(
+        self,
+        x: ArrayLike,
+        n_samples: int = 2000,
+        rng: Optional[np.random.Generator] = None,
+    ) -> np.ndarray:
+        x_mat = _to_2d_float(x)
+        if x_mat.shape[0] != 1:
+            raise ValueError("ConditionalGaussianModel.sample expects exactly one conditioning row.")
+        if n_samples <= 0:
+            raise ValueError("n_samples must be positive.")
+        if rng is None:
+            rng = np.random.default_rng()
+        mean_val = float(self.predict_mean(x_mat)[0])
+        return mean_val + float(self.residual_sigma) * rng.standard_normal(int(n_samples))
+
+
+def fit_conditional_distribution_model(
+    X: Union[np.ndarray, pd.DataFrame],
+    y: ArrayLike,
+    feature_cols: Optional[Sequence[str]] = None,
+) -> ConditionalGaussianModel:
+    """Fit a lightweight continuous outcome distribution model for IV outcome recovery."""
+    x_mat = _to_2d_float(X)
+    y_vec = _to_1d_float(y)
+    if x_mat.shape[0] == 0:
+        raise ValueError("Cannot fit conditional distribution model on empty data.")
+    if x_mat.shape[0] != y_vec.shape[0]:
+        raise ValueError(f"X/y row mismatch: {x_mat.shape[0]} vs {y_vec.shape[0]}.")
+
+    model = LinearRegression()
+    model.fit(x_mat, y_vec)
+    residual = y_vec - model.predict(x_mat)
+    sigma = float(np.std(residual, ddof=1)) if y_vec.shape[0] > 1 else 0.0
+    sigma = max(sigma, 1e-6)
+
+    if feature_cols is None:
+        feature_cols = [f"x{i}" for i in range(x_mat.shape[1])]
+    return ConditionalGaussianModel(feature_cols=list(feature_cols), mean_model=model, residual_sigma=sigma)
+
+
 
 def fit_selection_bias_model(
     df: pd.DataFrame,
@@ -447,3 +499,149 @@ def fit_iv_pipeline(
     if mean_w <= 0 or not np.isfinite(mean_w):
         raise ValueError(f"Invalid IV weight mean: {mean_w}")
     return w / mean_w
+
+
+def fit_iv_or_pipeline(
+    df: pd.DataFrame,
+    Xc_cols: Sequence[str],
+    Xz_cols: Sequence[str],
+    t_col: str = "T",
+    y_col: str = "Y",
+    g_col: str = "G",
+    source_g: Union[int, float] = 1,
+    target_g: Union[int, float] = 0,
+    max_iter: int = 2000,
+) -> Dict[str, object]:
+    """
+    Fit IV outcome-recovery models for an RCT-to-OBS CATE signal.
+
+    This is a parallel regression-recovery path. It reuses the same IV
+    source-selection components as ``fit_iv_pipeline`` but returns fitted models
+    instead of sample weights.
+    """
+    xc_cols = [str(c) for c in Xc_cols]
+    xz_cols = [str(c) for c in Xz_cols]
+    xczt_cols = list(dict.fromkeys(xc_cols + xz_cols + [t_col]))
+    xczyt_cols = list(dict.fromkeys(xczt_cols + [y_col]))
+    dist_cols = list(dict.fromkeys(xc_cols + xz_cols))
+
+    required = [*xczyt_cols, g_col]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns for fit_iv_or_pipeline: {missing}")
+    if df.shape[0] == 0:
+        raise ValueError("Cannot run fit_iv_or_pipeline on empty dataframe.")
+
+    df_y0 = df.copy()
+    df_y0[y_col] = 0.0
+    model_lambda = fit_classifier(df_y0[xczyt_cols], df_y0[g_col], max_iter=max_iter)
+    model_eta = fit_selection_bias_model(
+        df=df,
+        Xc_cols=xc_cols,
+        Xz_cols=xz_cols,
+        t_col=t_col,
+        y_col=y_col,
+        g_col=g_col,
+        baseline_model=model_lambda,
+        max_iter=max_iter,
+    )
+
+    df_source = df[df[g_col] == source_g].copy()
+    if df_source.empty:
+        raise ValueError(f"No source rows (G=={source_g}) available for IV outcome recovery.")
+    df_source_t1 = df_source[df_source[t_col] == 1].copy()
+    df_source_t0 = df_source[df_source[t_col] == 0].copy()
+    if df_source_t1.empty or df_source_t0.empty:
+        raise ValueError(f"Source rows (G=={source_g}) must contain both treatment arms for IV outcome recovery.")
+
+    model_f_t1 = fit_conditional_distribution_model(
+        X=df_source_t1[dist_cols],
+        y=df_source_t1[y_col],
+        feature_cols=dist_cols,
+    )
+    model_f_t0 = fit_conditional_distribution_model(
+        X=df_source_t0[dist_cols],
+        y=df_source_t0[y_col],
+        feature_cols=dist_cols,
+    )
+
+    return {
+        "model_lambda": model_lambda,
+        "model_eta": model_eta,
+        "model_f_t1": model_f_t1,
+        "model_f_t0": model_f_t0,
+        "Xc_cols": xc_cols,
+        "Xz_cols": xz_cols,
+        "dist_feature_cols": dist_cols,
+        "lambda_feature_cols": xczyt_cols,
+        "eta_feature_cols": model_eta.feature_cols,
+        "t_col": t_col,
+        "y_col": y_col,
+        "g_col": g_col,
+        "source_g": source_g,
+        "target_g": target_g,
+    }
+
+
+def predict_mu_t_iv_or(
+    models: Dict[str, object],
+    xc_vec: ArrayLike,
+    xz_vec: ArrayLike,
+    t: int,
+    M: int = 2000,
+    random_state: Optional[int] = None,
+    rng: Optional[np.random.Generator] = None,
+    prob_clip_eps: float = 1e-6,
+) -> float:
+    """Recover ``E[Y(t)|target, X]`` using IV selection-bias exponential tilting."""
+    if int(t) not in (0, 1):
+        raise ValueError(f"t must be 0 or 1, got {t}")
+    if M <= 0:
+        raise ValueError("M must be positive.")
+    if rng is None:
+        rng = np.random.default_rng(random_state)
+
+    xc = _to_1d_float(xc_vec)
+    xz = _to_1d_float(xz_vec)
+    model_f = models["model_f_t1"] if int(t) == 1 else models["model_f_t0"]
+    y_samples = _to_1d_float(model_f.sample(np.concatenate([xc, xz]), n_samples=M, rng=rng))
+
+    base_input = np.concatenate([xc, xz, np.asarray([float(t), 0.0], dtype=float)])
+    p_y0 = float(clip_prob(float(predict_prob(models["model_lambda"], base_input)), eps=prob_clip_eps))
+    lambda_val = float(np.log(p_y0 / (1.0 - p_y0)))
+
+    eta_rows = np.column_stack(
+        [
+            np.repeat(xc.reshape(1, -1), int(M), axis=0),
+            np.repeat(xz.reshape(1, -1), int(M), axis=0),
+            np.full((int(M), 1), float(t)),
+            y_samples.reshape(-1, 1),
+        ]
+    )
+    eta_vals = _to_1d_float(models["model_eta"].predict(eta_rows))
+    pi_vals = _to_1d_float(clip_prob(expit(lambda_val + eta_vals), eps=prob_clip_eps))
+    recovery_weights = (1.0 - pi_vals) / pi_vals
+
+    denom = float(np.sum(recovery_weights))
+    if not np.isfinite(denom) or denom <= 0:
+        raise ValueError(f"Invalid Monte Carlo denominator in predict_mu_t_iv_or: {denom}")
+    numerator = float(np.sum(y_samples * recovery_weights))
+    if not np.isfinite(numerator):
+        raise ValueError("Invalid Monte Carlo numerator in predict_mu_t_iv_or.")
+    return float(numerator / denom)
+
+
+def predict_tau_iv_or(
+    models: Dict[str, object],
+    xc_vec: ArrayLike,
+    xz_vec: ArrayLike,
+    M: int = 2000,
+    random_state: Optional[int] = None,
+    rng: Optional[np.random.Generator] = None,
+) -> Dict[str, float]:
+    """Compute ``tau_iv_or = mu1_iv_or - mu0_iv_or`` for one sample."""
+    if rng is None:
+        rng = np.random.default_rng(random_state)
+    mu1 = predict_mu_t_iv_or(models, xc_vec=xc_vec, xz_vec=xz_vec, t=1, M=M, rng=rng)
+    mu0 = predict_mu_t_iv_or(models, xc_vec=xc_vec, xz_vec=xz_vec, t=0, M=M, rng=rng)
+    return {"mu1_iv_or": float(mu1), "mu0_iv_or": float(mu0), "tau_iv_or": float(mu1 - mu0)}

@@ -12,6 +12,7 @@ from methods.plugins.base import SelectionCorrectionPlugin
 from methods.shadow import (
     build_shadow_corrected_targets_for_rhc,
     fit_shadow_pipeline,
+    predict_tau_shadow,
     screen_shadow_candidates_with_mode,
 )
 
@@ -187,3 +188,54 @@ class ShadowPlugin(SelectionCorrectionPlugin):
             "std_corrected_target": corrected["diagnostics"]["std_corrected_target"],
         }
         return np.asarray(corrected["corrected_targets"], dtype=float)
+
+    def get_regression_recovered_rct_signal(
+        self,
+        df_rct: pd.DataFrame,
+        df_obs: Optional[pd.DataFrame] = None,
+        x_cols: Optional[Sequence[str]] = None,
+        a_col: str = "T",
+        y_col: str = "Y",
+        g_col: str = "G",
+        raw_pseudo_effect: Optional[np.ndarray] = None,
+        base_w_hat: Optional[np.ndarray] = None,
+    ) -> Optional[np.ndarray]:
+        _ = df_obs, x_cols, a_col, y_col, g_col, raw_pseudo_effect, base_w_hat
+        if not self.fitted_:
+            return None
+
+        rng = np.random.default_rng(int(self.random_state))
+        mu1_list = []
+        mu0_list = []
+        tau_list = []
+        for _, row in df_rct.iterrows():
+            tau_obj = predict_tau_shadow(
+                self.shadow_models_,
+                xc_vec=row[self.xc_cols_].to_numpy(dtype=float) if self.xc_cols_ else np.asarray([], dtype=float),
+                xz_vec=row[self.xz_cols_].to_numpy(dtype=float) if self.xz_cols_ else np.asarray([], dtype=float),
+                M=int(self.shadow_mc_samples),
+                rng=rng,
+                shadow_direction="rct_to_obs",
+                source_g=1,
+                target_g=0,
+            )
+            mu1_list.append(float(tau_obj["mu1_shadow"]))
+            mu0_list.append(float(tau_obj["mu0_shadow"]))
+            tau_list.append(float(tau_obj["tau_shadow"]))
+
+        tau_shadow = np.asarray(tau_list, dtype=float).reshape(-1)
+        if np.any(~np.isfinite(tau_shadow)):
+            raise ValueError("ShadowPlugin produced non-finite regression recovered RCT signal.")
+
+        self.diagnostics_["shadow_regression_recovery_diagnostics"] = {
+            "mean_mu1_shadow": float(np.mean(mu1_list)),
+            "std_mu1_shadow": float(np.std(mu1_list)),
+            "mean_mu0_shadow": float(np.mean(mu0_list)),
+            "std_mu0_shadow": float(np.std(mu0_list)),
+            "mean_tau_shadow": float(np.mean(tau_shadow)),
+            "std_tau_shadow": float(np.std(tau_shadow)),
+            "shadow_direction": "rct_to_obs",
+            "source_g": 1,
+            "target_g": 0,
+        }
+        return tau_shadow

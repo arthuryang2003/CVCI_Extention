@@ -52,5 +52,19 @@ class SelectionCorrectionPlugin:
         _ = df_rct, base_w_hat
         return None
 
+    def get_regression_recovered_rct_signal(
+        self,
+        df_rct: pd.DataFrame,
+        df_obs: Optional[pd.DataFrame] = None,
+        x_cols: Optional[Sequence[str]] = None,
+        a_col: str = "T",
+        y_col: str = "Y",
+        g_col: str = "G",
+        raw_pseudo_effect: Optional[np.ndarray] = None,
+        base_w_hat: Optional[np.ndarray] = None,
+    ) -> Optional[np.ndarray]:
+        _ = df_rct, df_obs, x_cols, a_col, y_col, g_col, raw_pseudo_effect, base_w_hat
+        return None
+
     def summary(self) -> Dict[str, object]:
         return {"plugin": self.name, **self.diagnostics_}

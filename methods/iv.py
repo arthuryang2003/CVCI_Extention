@@ -17,6 +17,8 @@ import pandas as pd
 from scipy.optimize import minimize
 from scipy.special import expit
 from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 
 from utils.screening_utils import partial_abs_corr
 
@@ -44,7 +46,7 @@ def clip_prob(p: Union[float, np.ndarray], eps: float = 1e-6) -> Union[float, np
     return clipped
 
 
-def fit_classifier(X: ArrayLike, y: ArrayLike, max_iter: int = 2000) -> LogisticRegression:
+def fit_classifier(X: ArrayLike, y: ArrayLike, max_iter: int = 10000):
     """Fit logistic classifier with strict class-degeneracy checks."""
     x_mat = _to_2d_float(X)
     y_vec = _to_1d_float(y)
@@ -55,7 +57,7 @@ def fit_classifier(X: ArrayLike, y: ArrayLike, max_iter: int = 2000) -> Logistic
     if np.unique(y_vec).size < 2:
         raise ValueError("Cannot fit classifier: y has fewer than 2 classes.")
 
-    model = LogisticRegression(max_iter=max_iter)
+    model = make_pipeline(StandardScaler(), LogisticRegression(max_iter=max_iter))
     model.fit(x_mat, y_vec)
     return model
 

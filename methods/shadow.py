@@ -115,7 +115,7 @@ def clip_prob(p: Union[float, np.ndarray], eps: float = 1e-6) -> Union[float, np
 def fit_classifier(
     X: Union[np.ndarray, pd.DataFrame],
     y: ArrayLike,
-    max_iter: int = 2000,
+    max_iter: int = 10000,
 ) -> LogisticRegression:
     """Fit source classifier with explicit empty/degenerate-class checks."""
     x_mat = _to_2d_float(X)

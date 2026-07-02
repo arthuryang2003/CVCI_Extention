@@ -18,7 +18,7 @@ class IPSWPlugin(SelectionCorrectionPlugin):
     name: str = "ipsw"
     clip_min: float = 0.05
     clip_max: float = 20.0
-    max_iter: int = 1000
+    max_iter: int = 10000
 
     def fit(self, df_rct, df_obs, x_cols: Sequence[str], a_col, y_col, g_col):
         _ = a_col, y_col

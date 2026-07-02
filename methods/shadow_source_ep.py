@@ -99,7 +99,7 @@ def fit_shadow_source_ep_pipeline(
     model = Pipeline(
         steps=[
             ("preprocess", preprocessor),
-            ("classifier", LogisticRegression(max_iter=2000, random_state=random_state)),
+            ("classifier", LogisticRegression(max_iter=10000, random_state=random_state)),
         ]
     )
     model.fit(x_frame, g_vec)

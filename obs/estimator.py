@@ -12,6 +12,8 @@ import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.model_selection import StratifiedKFold
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 
 from obs.models import LinearBiasModel, LinearTreatmentEffectModel
 from obs.plugins import SelectionCorrectionPlugin
@@ -68,7 +70,7 @@ def _fit_mu_model(Z: np.ndarray, Y: np.ndarray) -> LinearRegression:
     return model
 
 
-def _fit_e_model(Z: np.ndarray, T: np.ndarray) -> LogisticRegression:
+def _fit_e_model(Z: np.ndarray, T: np.ndarray):
     z_arr = np.asarray(Z, dtype=float)
     t_arr = _to_1d_float_array(T)
     if z_arr.ndim != 2:
@@ -79,8 +81,14 @@ def _fit_e_model(Z: np.ndarray, T: np.ndarray) -> LogisticRegression:
         raise ValueError("e model Z contains non-finite values.")
     if np.unique(t_arr).size < 2:
         raise ValueError("Cannot fit e(X,G): treatment has fewer than 2 classes.")
-    model = LogisticRegression(max_iter=2000)
+    model = make_pipeline(StandardScaler(), LogisticRegression(max_iter=10000))
     model.fit(z_arr, t_arr)
+    return model
+
+
+def _logistic_core(model):
+    if hasattr(model, "steps"):
+        return model.steps[-1][1]
     return model
 
 
@@ -651,8 +659,8 @@ class IntegrativeObsEstimator:
             "nuisance": {
                 "mu_intercept": float(self.mu_model_.intercept_),
                 "mu_coef": self.mu_model_.coef_.reshape(-1).tolist(),
-                "e_intercept": self.e_model_.intercept_.reshape(-1).tolist(),
-                "e_coef": self.e_model_.coef_.reshape(-1).tolist(),
+                "e_intercept": _logistic_core(self.e_model_).intercept_.reshape(-1).tolist(),
+                "e_coef": _logistic_core(self.e_model_).coef_.reshape(-1).tolist(),
                 "e_hat_min": float(np.min(e_hat)),
                 "e_hat_mean": float(np.mean(e_hat)),
                 "e_hat_max": float(np.max(e_hat)),

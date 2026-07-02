@@ -181,7 +181,7 @@ def _select_shadow_column(obs_data: np.ndarray, exp_data: np.ndarray, config: Di
         relevance_pvalue = _compute_partial_exclusion_pvalue(candidate_exp, y_exp, nuisance_relevance)
 
         selection_features = np.concatenate((nuisance_independence, candidate_all.reshape(-1, 1)), axis=1)
-        positivity_model = LogisticRegression(max_iter=int(config.get("shadow_max_iter", 1000)))
+        positivity_model = LogisticRegression(max_iter=int(config.get("shadow_max_iter", 10000)))
         positivity_model.fit(selection_features, source)
         source_prob = positivity_model.predict_proba(selection_features)[:, 1]
         positivity_score = float(np.min(np.minimum(source_prob, 1.0 - source_prob)))
@@ -268,7 +268,7 @@ def _fit_shadow_score(obs_data: np.ndarray, exp_data: np.ndarray, config: Dict[s
     positivity_weight = float(config.get("shadow_positivity_weight", 10.0))
     positivity_margin = float(config.get("shadow_positivity_margin", 0.05))
     l2_weight = float(config.get("shadow_l2_weight", 1e-3))
-    max_iter = int(config.get("shadow_max_iter", 1000))
+    max_iter = int(config.get("shadow_max_iter", 10000))
 
     nuisance_rct = np.concatenate((a_exp, x_exp), axis=1)
     nuisance_all = np.concatenate((a_all, x_all, y_all_std.reshape(-1, 1)), axis=1)
